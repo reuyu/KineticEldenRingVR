@@ -36,6 +36,13 @@
   <a href="CHANGELOG.md">What's new</a>
 </p>
 
+> **Kinetic Elden Ring VR** is a fork of [ERVR](https://github.com/IlyaMez/EldenringVR) by Ilya Mezerowsky.
+> It adds a physics layer on top of ERVR: blades that stop on and embed in bodies, pushing, tripping,
+> grabbing and throwing, decided by your strength against the enemy's weight. It is in early
+> development and off by default (`[Physics] Enabled=false` in `ERVR.ini`), so a build behaves like
+> upstream ERVR until it is turned on. Licensed GPL-3.0-or-later, like ERVR. Everything below is
+> ERVR's own documentation.
+
 ERVR is a fan mod by **Ilya Mezerowsky**, the maker of [Spidy](https://github.com/IlyaMez/SpidyVR), that
 puts ELDEN RING in VR: an image for each eye at your headset's resolution, first person with the weapons in
 your hands, and melee where the swing you make is the attack. One zip, one launcher, one **START VR** button.
