@@ -6,6 +6,7 @@
 // (struct layouts), FreecamMod / TGA (FieldArea -> GameRend -> CSPersCam), and the
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
+#include "phys_layer.h"
 #include "game_version.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
@@ -2981,6 +2982,13 @@ void HkBody() {
     if (FramePumpCurrentPass() != 2) DirectLocomotion(player, f);
     UpdateArms(player, f);
 }
+// Kinetic physics layer, once per pose-hook call. Its own SEH guard: a fault in the experimental layer
+// turns the layer off for the session instead of taking first person down with it.
+int KineticSehFilter(unsigned code) { LOGE("[phys] exception 0x%08X in the physics layer; turning it off", code); return EXCEPTION_EXECUTE_HANDLER; }
+void KineticFrameGuarded(uint8_t* player, int pass) {
+    __try { kinetic::PhysGameFrame(player, pass); }
+    __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
+}
 void HkHandler(MidHookRegs*, void*) {
     InterlockedIncrement(&g_hkCalls);
     if (g_tripped || !Cfg().fpEnabled) return;
@@ -2998,6 +3006,7 @@ void HkHandler(MidHookRegs*, void*) {
         if (pass != 2) BodyHapticsGameFrame(player, g_frame);   // HP, the attacker's side, falls: the bHaptics vest
         CombatActionDiag(player, pass, g_frame);   // both passes: the press-vs-pass picture is the point
     }
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticFrameGuarded(MainPlayer(), FramePumpCurrentPass());
 }
 
 // ---------------------------------------------------------------- init
@@ -3033,6 +3042,32 @@ int GameERPlayerLevel() {
     uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return -1;
     int level = -1; SafeRead(pgd + 0x68, &level, 4);
     return level;
+}
+
+uint8_t* GameERChrHkbCharacter(uint8_t* chr) { return chr ? FindHkbCharacter(chr) : nullptr; }
+
+bool GameERHkbSkeleton(uint8_t* hkb, std::vector<std::string>& names, std::vector<int16_t>& parents) {
+    if (!hkb) return false;
+    uint8_t* setup = Deref(hkb + off::Hkb_Setup); uint8_t* hka = setup ? Deref(setup + off::Setup_Skeleton) : nullptr;
+    int count = 0;
+    if (!hka || !RD(hka + off::Hka_BoneCount, count) || count <= 0 || count > 1024) return false;
+    char** layout = (char**)Deref(hka + off::Hka_NameLayout);
+    int16_t* par = (int16_t*)Deref(hka + off::Hka_ParentIdx);
+    if (!layout || !par) return false;
+    names.assign(count, std::string()); parents.assign(count, -1);
+    for (int i = 0; i < count; ++i) {
+        char* nm = nullptr; RD(layout + i * 2, nm);
+        char buf[64]{}; if (nm) SafeRead(nm, buf, 63);
+        names[i] = buf;
+        RD(par + i, parents[i]);
+    }
+    return true;
+}
+
+float* GameERHkbLivePose(uint8_t* hkb) {
+    if (!hkb) return nullptr;
+    Skeleton tmp; tmp.hkb = hkb;
+    return (float*)tmp.LivePose();
 }
 
 uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
