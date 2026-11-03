@@ -1,0 +1,9 @@
+{
+  "name": "kinetic-eldenring-vr",
+  "version-string": "0.1.0",
+  "description": "Kinetic Elden Ring VR: ERVR fork with a B&S-style physics layer",
+  "dependencies": [
+    "physx"
+  ],
+  "builtin-baseline": "afa249f12f52ed8a3b919f195495ba8b330288d1"
+}

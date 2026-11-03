@@ -796,6 +796,21 @@ struct Config {
     std::string physicsTestAxis = "x";
     float physicsTestDeg = 90.f;
     float physicsTestRadius = 4.f;
+    // M2: B&S-style sword (PhysX). The hand+weapon is one rigid body pulled toward the controller by a
+    // force/torque-limited joint (src/phys/sword_rig.*); replaces [Combat] Inertia while on.
+    bool  physicsSword = true;
+    float physicsSwordKgPerWeight = 0.5f;   // kg of simulated mass per ER weight unit
+    float physicsSwordHandKg = 1.0f;        // the hand itself
+    float physicsSwordForceBase = 300.f;    // N, + ForcePerStr * STR: how hard the arm can pull the grip
+    float physicsSwordForcePerStr = 10.f;
+    float physicsSwordTorqueBase = 25.f;    // N*m, + TorquePerStr * STR: how hard the wrist can turn the blade
+    float physicsSwordTorquePerStr = 1.5f;
+    float physicsSwordLinearSpring = 4000.f;  // N/m
+    float physicsSwordLinearDamper = 120.f;   // N*s/m
+    float physicsSwordAngularSpring = 600.f;  // N*m/rad
+    float physicsSwordAngularDamper = 25.f;   // N*m*s/rad
+    float physicsSwordSnapDistance = 0.6f;    // m: further than this from the controller, the grip snaps back
+    bool  physicsSwordLog = true;             // lag summary every 5 s
 
     void Load(const std::wstring& iniPath);
 };

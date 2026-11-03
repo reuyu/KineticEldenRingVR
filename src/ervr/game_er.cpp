@@ -7,6 +7,7 @@
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
 #include "phys_layer.h"
+#include "sword_rig.h"
 #include "game_version.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
@@ -1042,7 +1043,17 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dt : 0.f, shaftAxis);
     const float reach = CombatHandReach(h);
     const Vec3 previousTip = s.pos * c.handScale + s.q.Rotate(shaftAxis) * reach;
-    if (c.kineticInertia && goodDt) {
+    // Kinetic M2: the B&S-style sword. The grip itself is simulated (mass, limited arm strength), so it
+    // moves the position as well as the angle; when it is off or unavailable ERVR's angular lag runs as before.
+    bool simulated = false;
+    if (goodDt && kinetic::SwordRigActive()) {
+        const bool twoArms = CombatTwoHandWeaponHand() == h;
+        simulated = kinetic::SwordRigStep(h, p, q, dt, CombatHandWeight(h), reach, CombatHandCom(h),
+                                          twoArms ? c.inertiaTwoHandTorque : 1.f, shaftAxis);
+    } else if (!goodDt) {
+        kinetic::SwordRigReset(h);
+    }
+    if (!simulated && c.kineticInertia && goodDt) {
         const bool twoArms = CombatTwoHandWeaponHand() == h;
         q = StepWeaponOrientation(s.q, q, shaftAxis, dt, CombatHandWeight(h), reach,
                                   CombatHandCom(h), c.kineticAccelWeight, c.inertiaComRef,
@@ -3042,6 +3053,13 @@ int GameERPlayerLevel() {
     uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return -1;
     int level = -1; SafeRead(pgd + 0x68, &level, 4);
     return level;
+}
+
+// PlayerGameData stats are vigor, mind, endurance, strength... from +0x3C (see SetAllStats below).
+int GameERPlayerStrength() {
+    uint8_t* pgd = GameERPlayerGameData(); if (!pgd) return -1;
+    int str = -1; SafeRead(pgd + 0x48, &str, 4);
+    return str;
 }
 
 uint8_t* GameERChrHkbCharacter(uint8_t* chr) { return chr ? FindHkbCharacter(chr) : nullptr; }
