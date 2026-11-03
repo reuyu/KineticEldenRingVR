@@ -1,5 +1,8 @@
 #pragma once
 #include "vrmath.h"
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace ervr {
 
@@ -103,6 +106,16 @@ bool GameERRiding();
 bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip);
 // A character's rendered position (its ChrCtrl model matrix), for distances to it. Any thread; SafeRead only.
 bool GameERChrPosition(uint8_t* chr, Vec3* out);
+
+// ---- Kinetic physics layer (src/phys) ----------------------------------------------
+// Skeleton access for ANY character (enemies included), through the same hkbCharacter path the player's
+// arm solve uses. Game thread only (the pose buffer is rewritten by the animation update).
+// hkbCharacter of a ChrIns, or null when it has none (yet).
+uint8_t* GameERChrHkbCharacter(uint8_t* chr);
+// Bone names and parent indices of an hkbCharacter's skeleton. False on a failed or implausible read.
+bool GameERHkbSkeleton(uint8_t* hkb, std::vector<std::string>& names, std::vector<int16_t>& parents);
+// The live, parent-relative pose buffer: boneCount x hkQsTransform {t[4], q[4] xyzw, s[4]}. Null if unreadable.
+float* GameERHkbLivePose(uint8_t* hkb);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

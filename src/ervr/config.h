@@ -788,6 +788,14 @@ struct Config {
     // [Physics]  Kinetic Elden Ring VR physics layer (src/phys/). Off by default: with it off
     // the mod behaves exactly like upstream ERVR.
     bool  physicsEnabled = false;
+    float physicsTrackRadius = 6.f;       // m: characters this close are tracked (and logged on entering)
+    bool  physicsDumpBones = true;        // log each new skeleton's bone names once
+    // M1 spike (S1): overwrite one bone of the nearest character, to see whether the game draws it and whether
+    // its attack hitboxes follow. Empty = off. The bone rotates by TestDeg about its own local TestAxis (x|y|z).
+    std::string physicsTestBone;
+    std::string physicsTestAxis = "x";
+    float physicsTestDeg = 90.f;
+    float physicsTestRadius = 4.f;
 
     void Load(const std::wstring& iniPath);
 };

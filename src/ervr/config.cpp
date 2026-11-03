@@ -465,6 +465,12 @@ void Config::Load(const std::wstring& path) {
     cameraChain    = GetS(ini, L"Experimental", L"CameraChain", cameraChain);
 
     physicsEnabled = GetB(ini, L"Physics", L"Enabled", physicsEnabled);
+    physicsTrackRadius = GetF(ini, L"Physics", L"TrackRadius", physicsTrackRadius);
+    physicsDumpBones = GetB(ini, L"Physics", L"DumpBones", physicsDumpBones);
+    physicsTestBone = GetS(ini, L"Physics", L"TestBone", physicsTestBone);
+    physicsTestAxis = GetS(ini, L"Physics", L"TestAxis", physicsTestAxis);
+    physicsTestDeg = GetF(ini, L"Physics", L"TestDeg", physicsTestDeg);
+    physicsTestRadius = GetF(ini, L"Physics", L"TestRadius", physicsTestRadius);
     cameraYawOffset   = GetI(ini, L"Experimental", L"CameraYawOffset", cameraYawOffset);
     cameraPitchOffset = GetI(ini, L"Experimental", L"CameraPitchOffset", cameraPitchOffset);
     handAimStrength = GetF(ini, L"Experimental", L"HandAimStrength", handAimStrength);
