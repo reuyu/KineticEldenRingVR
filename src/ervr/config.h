@@ -785,6 +785,10 @@ struct Config {
     float autoPilotMenuPeriod = 6.f;
     std::string autoPilotMenuButton = "START";
 
+    // [Physics]  Kinetic Elden Ring VR physics layer (src/phys/). Off by default: with it off
+    // the mod behaves exactly like upstream ERVR.
+    bool  physicsEnabled = false;
+
     void Load(const std::wstring& iniPath);
 };
 

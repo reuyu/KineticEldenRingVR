@@ -26,6 +26,7 @@
 #include "weapon_wheel.h"
 #include "belt.h"
 #include "body_haptics_er.h"
+#include "phys_layer.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -163,6 +164,7 @@ DWORD WINAPI Worker(LPVOID) {
     StereoInit();
     if (Cfg().fpEnabled) GameERInit();
     PatchesInit();   // [Patches] FpsTarget etc.; no-op when unset
+    kinetic::PhysInit();   // [Physics] Kinetic Elden Ring VR layer; off by default
 
     FILETIME iniTime = IniWriteTime(ini);
     bool xinputHooked = false, addonInstalled = false;
@@ -214,6 +216,7 @@ DWORD WINAPI Worker(LPVOID) {
                 VirtualPadInit();
                 PatchesApplyGameResolution();   // GameRes/GameResScale hot-edit
                 LOGI("ERVR.ini reloaded");
+                kinetic::PhysConfigChanged();
                 ConfigLogNotes();
             }
         }
