@@ -16,7 +16,9 @@ if(NOT KINETIC_PHYSX)
   set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "" FORCE)
 endif()
 
-project(EldenRingVR VERSION 0.6.5 LANGUAGES C CXX RC)
+# Kinetic Elden Ring VR versions: 0.7.x on top of upstream ERVR 0.6.5, x = the Kinetic milestone (0.7.2 = M2).
+# A distinct number makes the launcher replace an installed ERVR.dll on its own ("older" -> Update).
+project(EldenRingVR VERSION 0.7.2 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")

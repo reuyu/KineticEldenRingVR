@@ -45,6 +45,8 @@ void Apply(const char* why) {
         LOGI("[phys] M1 spike: tracking within %.1f m, bone dump %s, test bone '%s' axis %s %.0f deg within %.1f m",
              c.physicsTrackRadius, c.physicsDumpBones ? "on" : "off", c.physicsTestBone.c_str(),
              c.physicsTestAxis.c_str(), c.physicsTestDeg, c.physicsTestRadius);
+        LOGI("[phys] Kinetic build %s: B&S-style sword %s", ERVR_VERSION,
+             !KINETIC_HAS_PHYSX ? "NOT built in (no PhysX in this build)" : c.physicsSword ? "on" : "off (Sword=false)");
     }
     TrackerReset();
     g_testHkb = nullptr; g_haveWritten = false;

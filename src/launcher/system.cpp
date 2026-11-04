@@ -833,6 +833,14 @@ Change installErvr(const Scan& scan, bool replaceBuild) {
                 CopyFileW((from / file).c_str(), (game / file).c_str(), FALSE);
         if (!in.ini && c.copy(from / L"ERVR\\ERVR.ini", game / L"ERVR\\ERVR.ini"))
             c.change.lines.push_back("Added ERVR\\ERVR.ini (its settings; edit them in Options).");
+        // Kinetic: an existing ERVR.ini keeps every value, but gains the [Physics] settings it lacks.
+        if (in.ini) {
+            const fs::path mine = game / L"ERVR\\ERVR.ini";
+            const std::string have = readText(mine, 1 << 22);
+            const std::string merged = text::iniAddMissing(have, readText(from / L"ERVR\\ERVR.ini", 1 << 22), "Physics");
+            if (merged != have && replaceWhole(mine.wstring(), merged))
+                c.change.lines.push_back("Added the new [Physics] settings to ERVR\\ERVR.ini (your values stay).");
+        }
         return true;
     };
     const fs::path dxgi = game / L"dxgi.dll";

@@ -28,6 +28,23 @@ int main() {
     Check(edited.size() == ini.size() + 2, "nothing else changes");
     Check(edited.substr(0, 3) == "\xEF\xBB\xBF", "byte order mark kept");
 
+    // Kinetic: an update brings new [Physics] settings without touching the player's values.
+    {
+        const std::string shipped = "[VR]\nA=1\n[Physics]\n; physics layer\nEnabled=false\nSword=true\n\n[Experimental]\nX=1\n";
+        const std::string old = "[VR]\r\nA=2\r\n";
+        const std::string merged = iniAddMissing(old, shipped, "Physics");
+        Check(merged.rfind("[VR]\r\nA=2\r\n", 0) == 0, "player's own lines kept");
+        Check(merged.find("; physics layer\r\n") != std::string::npos, "missing section copied with comments, player's line ends");
+        Check(iniGet(merged, "Physics", "Sword") == "true", "missing section's keys arrive");
+        Check(merged.find("[Experimental]") == std::string::npos, "only that section");
+        const std::string mine = "[Physics]\nEnabled=true\n";
+        const std::string merged2 = iniAddMissing(mine, shipped, "Physics");
+        Check(iniGet(merged2, "Physics", "Enabled") == "true", "player's value kept");
+        Check(iniGet(merged2, "Physics", "Sword") == "true", "missing key added");
+        Check(iniAddMissing(merged2, shipped, "Physics") == merged2, "nothing missing: unchanged");
+        Check(iniAddMissing(old, "[VR]\nA=1\n", "Physics") == old, "section not shipped: unchanged");
+    }
+
     edited = iniSet(ini, "VR", "WorldScale", "0.8");
     Check(edited.find("RenderScale=1.0\r\nWorldScale=0.8\r\n; trailing comment") != std::string::npos,
           "a missing key goes after its section's last key, with the file's line ends");
