@@ -812,8 +812,8 @@ struct Config {
     // How far the blade's aim may trail the wrist (no runaway spins), set by how heavy the weapon is for this arm:
     // load = the weapon's gravity torque about the grip / the wrist torque (STR, two hands). Light for you -> MinAngle
     // (precise), at or past SwordLoadForMax -> MaxAngle (it swings you).
-    float physicsSwordMinAngleDeg = 10.f;
-    float physicsSwordMaxAngleDeg = 45.f;
+    float physicsSwordMinAngleDeg = 30.f;   // 35 deg flat felt right (play test 2) for a weight-9 sword at STR 16
+    float physicsSwordMaxAngleDeg = 60.f;
     float physicsSwordLoadForMax = 0.6f;
     float physicsSwordSnapDistance = 0.6f;    // m: further than this from the controller, the grip snaps back
     bool  physicsSwordLog = true;             // lag summary every 5 s
