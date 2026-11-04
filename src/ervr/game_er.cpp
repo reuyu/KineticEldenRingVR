@@ -3063,6 +3063,20 @@ int GameERPlayerLevel() {
 }
 
 // PlayerGameData stats are vigor, mind, endurance, strength... from +0x3C (see SetAllStats below).
+int GameERChrPoseBuffers(uint8_t* chr, float* out[2]) {
+    int n = 0;
+    uint8_t* beh = chr ? Behavior(chr) : nullptr; if (!beh) return 0;
+    for (size_t o : { off::Beh_Unk10, off::Beh_HkbContext }) {
+        uint8_t* ctx = Deref(beh + o); if (!ctx) continue;
+        uint8_t* hkb = Deref(ctx + off::Ctx_HkbCharacter); if (!hkb) continue;
+        Skeleton tmp; tmp.hkb = hkb;
+        float* pose = (float*)tmp.LivePose(); if (!pose) continue;
+        if (n == 1 && out[0] == pose) continue;
+        out[n++] = pose;
+    }
+    return n;
+}
+
 uint8_t* GameERChrCtrl(uint8_t* chr) { return chr ? Deref(chr + off::Chr_ChrCtrl) : nullptr; }
 
 int GameERPlayerStrength() {

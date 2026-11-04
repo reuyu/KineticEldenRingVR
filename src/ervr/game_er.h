@@ -96,6 +96,8 @@ int GameERPlayerLevel();
 int GameERPlayerStrength();
 // A character's ChrCtrl (what the model-pos update is called with), or null.
 uint8_t* GameERChrCtrl(uint8_t* chr);
+// The character's live pose buffers through each behavior path that has one (distinct, up to 2). Returns the count.
+int GameERChrPoseBuffers(uint8_t* chr, float* out[2]);
 // WorldChrMan (null until in-game). Combat's enemy watcher reads the game's own by-distance
 // ChrIns list from it (hit / damage ground truth).
 uint8_t* GameERWorldChrMan();

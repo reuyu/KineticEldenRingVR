@@ -69,6 +69,47 @@ ervr::Vec3 TestAxis() {
 // enemy's animation runs after that point. The write now also happens at the character's own model-pos update
 // (Hook_UpdateChrModelPos), where ERVR's player arms are consumed by the renderer.
 
+// Every live pose buffer the target has (both behavior paths FindHkbCharacter knows; they can differ for
+// enemies), each with its own write state. Test 2 showed writes landing ~75/s at both hook points yet nothing on
+// screen; "fresh" counts how often the game had re-animated a buffer since our last write. A buffer that is never
+// fresh is not the one being animated (or drawn).
+struct TestBuf { float* pose = nullptr; float last[4]{}; float base[4]{}; bool have = false; long fresh = 0, stale = 0; };
+TestBuf g_buf[2];
+int g_bufCount = 0;
+
+void RefreshBuffers() {
+    float* found[2] = {};
+    const int n = ervr::GameERChrPoseBuffers(g_testChr, found);
+    for (int i = 0; i < 2; ++i) {
+        float* want = i < n ? found[i] : nullptr;
+        if (g_buf[i].pose != want) g_buf[i] = TestBuf{}, g_buf[i].pose = want;
+    }
+    g_bufCount = n;
+}
+
+// Writes the rotated bone into every buffer. Caller holds g_testMtx.
+bool WriteTestBone() {
+    if (!g_testChr || g_testBone < 0) return false;
+    bool any = false;
+    for (int i = 0; i < g_bufCount; ++i) {
+        TestBuf& b = g_buf[i];
+        if (!b.pose) continue;
+        float* q = b.pose + g_testBone * 12 + 4;   // hkQsTransform {t[4], q[4], s[4]}
+        float cur[4];
+        if (!ervr::SafeRead(q, cur, sizeof(cur))) continue;
+        // Our own write still in the buffer = the animation has not run since: rotate its pose, not ours.
+        const bool ours = b.have && cur[0] == b.last[0] && cur[1] == b.last[1] && cur[2] == b.last[2] && cur[3] == b.last[3];
+        if (ours) ++b.stale; else { ++b.fresh; for (int k = 0; k < 4; ++k) b.base[k] = cur[k]; }
+        const ervr::Quat base{b.base[0], b.base[1], b.base[2], b.base[3]};
+        const ervr::Quat out = (base * ervr::Quat::AxisAngle(TestAxis(), ervr::Cfg().physicsTestDeg * 3.14159265f / 180.f)).Normalized();
+        const float w[4] = {out.x, out.y, out.z, out.w};
+        if (!ervr::SafeWrite(q, w, sizeof(w))) continue;
+        for (int k = 0; k < 4; ++k) b.last[k] = w[k];
+        b.have = true; any = true;
+    }
+    return any;
+}
+
 // Picks the target for this frame. Game thread, from the pose hook.
 void SelectTestTarget() {
     const auto& c = ervr::Cfg();
@@ -93,34 +134,17 @@ void SelectTestTarget() {
         g_testChr = target->chr; g_testHkb = target->hkb; g_testBone = bone; g_haveWritten = false;
         LOGI("[phys] test: overriding '%s' (#%d) of npc %d at %.1f m", c.physicsTestBone.c_str(), bone, target->npcId, target->distance);
     }
+    RefreshBuffers();
     const double now = NowSec();
     if (now - g_lastTestLog > 5.0) {
         g_lastTestLog = now;
-        LOGI("[phys] test: npc %d at %.1f m, writes in 5 s: %ld at its model-pos update, %ld from the pose hook",
-             target->npcId, target->distance, g_modelPosWrites, g_poseHookWrites);
+        LOGI("[phys] test: npc %d at %.1f m, writes in 5 s: %ld at its model-pos update, %ld from the pose hook; "
+             "%d pose buffer(s): A %p fresh %ld stale %ld, B %p fresh %ld stale %ld",
+             target->npcId, target->distance, g_modelPosWrites, g_poseHookWrites, g_bufCount,
+             (void*)g_buf[0].pose, g_buf[0].fresh, g_buf[0].stale, (void*)g_buf[1].pose, g_buf[1].fresh, g_buf[1].stale);
         g_modelPosWrites = g_poseHookWrites = 0;
+        for (auto& b : g_buf) b.fresh = b.stale = 0;
     }
-}
-
-// Writes the rotated bone into the target's live pose. Caller holds g_testMtx.
-bool WriteTestBone() {
-    if (!g_testHkb || g_testBone < 0) return false;
-    float* pose = ervr::GameERHkbLivePose(g_testHkb);
-    if (!pose) return false;
-    float* q = pose + g_testBone * 12 + 4;   // hkQsTransform {t[4], q[4], s[4]}
-    float cur[4];
-    if (!ervr::SafeRead(q, cur, sizeof(cur))) return false;
-    // Our own write still in the buffer = the animation has not run since: rotate its pose, not ours.
-    const bool ours = g_haveWritten && cur[0] == g_lastWritten[0] && cur[1] == g_lastWritten[1] &&
-                      cur[2] == g_lastWritten[2] && cur[3] == g_lastWritten[3];
-    if (!ours) for (int i = 0; i < 4; ++i) g_base[i] = cur[i];
-    const ervr::Quat base{g_base[0], g_base[1], g_base[2], g_base[3]};
-    const ervr::Quat out = (base * ervr::Quat::AxisAngle(TestAxis(), ervr::Cfg().physicsTestDeg * 3.14159265f / 180.f)).Normalized();
-    const float w[4] = {out.x, out.y, out.z, out.w};
-    if (!ervr::SafeWrite(q, w, sizeof(w))) return false;
-    for (int i = 0; i < 4; ++i) g_lastWritten[i] = w[i];
-    g_haveWritten = true;
-    return true;
 }
 
 void TestBoneOverride() {
