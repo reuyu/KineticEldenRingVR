@@ -1,0 +1,69 @@
+name: Test build
+
+# Kinetic test builds for in-game testing (approved by the repo owner, 2026-11-04): every push to a kinetic/*
+# branch builds ERVR and publishes the result as the pre-release "test-<branch>" (replaced on each push), so the
+# test machine can fetch it without a GitHub login (CI artifacts need one).
+on:
+  push:
+    branches: ["kinetic/**"]
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
+          git -C "$env:RUNNER_TEMP/vcpkg" checkout $baseline
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/vcpkg-cache" | Out-Null
+          "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" | Out-File -Append $env:GITHUB_ENV
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP/vcpkg-cache" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DKINETIC_REQUIRE_PHYSX=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Publish pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $branch = "${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
+          $tag = "test-$branch"
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          Compress-Archive -Path build/dist/* -DestinationPath "ERVR-dist.zip" -Force
+          Copy-Item build/dist/ERVR/ERVR.dll ERVR.dll
+          $hash = (Get-FileHash ERVR.dll -Algorithm SHA256).Hash
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create $tag ERVR.dll ERVR-dist.zip --prerelease --target "${{ github.sha }}" `
+            --title "Test build $branch @ $sha" `
+            --notes "Kinetic test build of $branch at $sha. ERVR.dll SHA256: $hash. Not a release: for in-game testing only."
