@@ -94,6 +94,8 @@ bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc)
 int GameERPlayerLevel();
 // The player's Strength stat (1..99), or -1.
 int GameERPlayerStrength();
+// A character's ChrCtrl (what the model-pos update is called with), or null.
+uint8_t* GameERChrCtrl(uint8_t* chr);
 // WorldChrMan (null until in-game). Combat's enemy watcher reads the game's own by-distance
 // ChrIns list from it (hit / damage ground truth).
 uint8_t* GameERWorldChrMan();

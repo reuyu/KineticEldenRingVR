@@ -50,6 +50,7 @@ struct Params {
     float force, torque;        // the arm's limits this frame
     float kLin, dLin, kAng, dAng;
     float snap;
+    float maxAngle;             // rad
 };
 
 struct Rig {
@@ -64,6 +65,7 @@ struct Rig {
     // lag statistics for the periodic log
     double statSince = 0;
     float lagSum = 0, lagMax = 0, angSum = 0, angMax = 0; int statN = 0;
+    int capHits = 0, subSteps = 0; float twistMax = 0;   // ConstrainOrientation: how often the cap held the blade, largest roll removed (deg)
     float lastMass = 0, lastForce = 0, lastTorque = 0;
 };
 Rig g_rig[2];
@@ -133,7 +135,7 @@ void UpdateMass(Rig& r, const Params& p) {
     float perp = mw * p.reach * p.reach / 12.f + mw * (p.com - cAlong) * (p.com - cAlong)
                + 0.4f * mh * handR * handR + mh * cAlong * cAlong;
     float axial = 0.5f * mw * 0.02f * 0.02f + 0.4f * mh * handR * handR;
-    perp = std::fmax(perp, 0.004f); axial = std::fmax(axial, 0.003f);
+    perp = std::fmax(perp, 0.02f); axial = std::fmax(axial, 0.01f);
     // Principal frame: local X along the shaft.
     PxVec3 s = p.shaft; s.normalize();
     const PxVec3 x(1.f, 0.f, 0.f);
@@ -168,6 +170,43 @@ void Place(Rig& r, const PxTransform& t) {
     r.placed = true;
 }
 
+// B&S keeps the weapon controllable: the wrist owns the roll about the blade, and the blade's aim can trail the
+// hand only so far. 0.7.2 had neither and a 5 kg blade trailed by up to 180 degrees (a "360 spin"). After each
+// sub-step: drop any roll about the shaft relative to the controller, cap the remaining swing at maxAngle, and
+// when capped, take away the angular velocity that was carrying it further.
+void ConstrainOrientation(Rig& r, const Params& p, const PxTransform& anchor) {
+    const PxTransform b = r.body->getGlobalPose();
+    PxQuat rel = anchor.q.getConjugate() * b.q;          // the body in the controller's frame
+    if (rel.w < 0.f) rel = -rel;
+    const PxVec3 s = p.shaft;                            // unit, controller-local
+    const PxVec3 v(rel.x, rel.y, rel.z);
+    const PxVec3 proj = s * v.dot(s);
+    PxQuat twist(proj.x, proj.y, proj.z, rel.w);
+    const float tn = twist.magnitude();
+    r.twistMax = std::fmax(r.twistMax, 2.f * std::acos(std::fmin(std::fabs(rel.w) / std::fmax(tn, 1e-6f), 1.f)) * 57.2958f);
+    ++r.subSteps;
+    twist = tn > 1e-6f ? twist * (1.f / tn) : PxQuat(PxIdentity);
+    PxQuat swing = rel * twist.getConjugate();
+    if (swing.w < 0.f) swing = -swing;
+    const float angle = 2.f * std::acos(std::fmin(swing.w, 1.f));
+    bool capped = false;
+    if (angle > p.maxAngle) {
+        const float sh = std::sin(angle * 0.5f);
+        const PxVec3 axis = sh > 1e-6f ? PxVec3(swing.x, swing.y, swing.z) * (1.f / sh) : PxVec3(1.f, 0.f, 0.f);
+        swing = PxQuat(p.maxAngle, axis.getNormalized());
+        capped = true;
+        ++r.capHits;
+    }
+    r.body->setGlobalPose(PxTransform(b.p, (anchor.q * swing).getNormalized()));
+    // Angular velocity relative to the hand: no roll about the shaft, and none at all once the cap is hit.
+    const PxVec3 wa = r.anchor->getAngularVelocity();
+    PxVec3 wr = r.body->getAngularVelocity() - wa;
+    const PxVec3 sw = (anchor.q * swing).rotate(s);
+    wr -= sw * wr.dot(sw);
+    if (capped) wr = PxVec3(0.f);
+    r.body->setAngularVelocity(wa + wr);
+}
+
 // The simulation proper. No C++ objects with destructors: called inside an SEH guard.
 bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     Rig& r = *rp; const Params& p = *pp;
@@ -188,6 +227,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
         r.anchor->setKinematicTarget(PxTransform(pos, rot));
         r.scene->simulate(h);
         r.scene->fetchResults(true);
+        ConstrainOrientation(r, p, PxTransform(pos, rot));
     }
     r.lastTarget = p.target;
     *out = r.body->getGlobalPose();
@@ -243,6 +283,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     p.kLin = std::fmax(c.physicsSwordLinearSpring, 0.f); p.dLin = std::fmax(c.physicsSwordLinearDamper, 0.f);
     p.kAng = std::fmax(c.physicsSwordAngularSpring, 0.f); p.dAng = std::fmax(c.physicsSwordAngularDamper, 0.f);
     p.snap = std::fmax(c.physicsSwordSnapDistance, 0.05f);
+    p.maxAngle = std::fmin(std::fmax(c.physicsSwordMaxAngleDeg, 1.f), 120.f) * 0.0174533f;
 
     PxTransform out(PxIdentity);
     if (!StepGuarded(&r, &p, &out)) {
@@ -261,10 +302,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "",
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax);
-        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0;
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax);
+        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0;
     }
 
     pos = {out.p.x, out.p.y, out.p.z};

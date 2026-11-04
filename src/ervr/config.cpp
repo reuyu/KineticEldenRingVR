@@ -482,6 +482,7 @@ void Config::Load(const std::wstring& path) {
     physicsSwordLinearDamper = GetF(ini, L"Physics", L"SwordLinearDamper", physicsSwordLinearDamper);
     physicsSwordAngularSpring = GetF(ini, L"Physics", L"SwordAngularSpring", physicsSwordAngularSpring);
     physicsSwordAngularDamper = GetF(ini, L"Physics", L"SwordAngularDamper", physicsSwordAngularDamper);
+    physicsSwordMaxAngleDeg = GetF(ini, L"Physics", L"SwordMaxAngleDeg", physicsSwordMaxAngleDeg);
     physicsSwordSnapDistance = GetF(ini, L"Physics", L"SwordSnapDistance", physicsSwordSnapDistance);
     physicsSwordLog = GetB(ini, L"Physics", L"SwordLog", physicsSwordLog);
     cameraYawOffset   = GetI(ini, L"Experimental", L"CameraYawOffset", cameraYawOffset);

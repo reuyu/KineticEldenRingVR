@@ -2853,8 +2853,11 @@ uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
     __try { RewriteIfClobbered(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     return rv;
 }
+void KineticModelPosGuarded(void* ctrl);
 void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     CountPass(g_cntModelPos);
+    // Kinetic: enemy bone overrides go in here, before the renderer consumes this character's pose.
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl);
     // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
     // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
     // The upper-body layer ran just before us; put ours back first, then let the original consume it.
@@ -3000,6 +3003,10 @@ void KineticFrameGuarded(uint8_t* player, int pass) {
     __try { kinetic::PhysGameFrame(player, pass); }
     __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
 }
+void KineticModelPosGuarded(void* ctrl) {
+    __try { kinetic::PhysBeforeModelPos(ctrl); }
+    __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
+}
 void HkHandler(MidHookRegs*, void*) {
     InterlockedIncrement(&g_hkCalls);
     if (g_tripped || !Cfg().fpEnabled) return;
@@ -3056,6 +3063,8 @@ int GameERPlayerLevel() {
 }
 
 // PlayerGameData stats are vigor, mind, endurance, strength... from +0x3C (see SetAllStats below).
+uint8_t* GameERChrCtrl(uint8_t* chr) { return chr ? Deref(chr + off::Chr_ChrCtrl) : nullptr; }
+
 int GameERPlayerStrength() {
     uint8_t* pgd = GameERPlayerGameData(); if (!pgd) return -1;
     int str = -1; SafeRead(pgd + 0x48, &str, 4);
