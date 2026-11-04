@@ -51,6 +51,7 @@ struct Params {
     float kLin, dLin, kAng, dAng;
     float snap;
     float maxAngle;             // rad
+    float load;                 // weapon weight torque / wrist torque
 };
 
 struct Rig {
@@ -66,7 +67,7 @@ struct Rig {
     double statSince = 0;
     float lagSum = 0, lagMax = 0, angSum = 0, angMax = 0; int statN = 0;
     int capHits = 0, subSteps = 0; float twistMax = 0;   // ConstrainOrientation: how often the cap held the blade, largest roll removed (deg)
-    float lastMass = 0, lastForce = 0, lastTorque = 0;
+    float lastMass = 0, lastForce = 0, lastTorque = 0, lastLoad = 0, lastCapDeg = 0;
 };
 Rig g_rig[2];
 
@@ -283,7 +284,14 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     p.kLin = std::fmax(c.physicsSwordLinearSpring, 0.f); p.dLin = std::fmax(c.physicsSwordLinearDamper, 0.f);
     p.kAng = std::fmax(c.physicsSwordAngularSpring, 0.f); p.dAng = std::fmax(c.physicsSwordAngularDamper, 0.f);
     p.snap = std::fmax(c.physicsSwordSnapDistance, 0.05f);
-    p.maxAngle = std::fmin(std::fmax(c.physicsSwordMaxAngleDeg, 1.f), 120.f) * 0.0174533f;
+    // Overshoot allowance from how heavy this weapon is for this arm (weight torque about the grip / wrist torque).
+    p.load = p.weaponKg * 9.81f * p.com / std::fmax(p.torque, 1.f);
+    {
+        const float lo = std::fmin(std::fmax(c.physicsSwordMinAngleDeg, 1.f), 120.f);
+        const float hi = std::fmin(std::fmax(c.physicsSwordMaxAngleDeg, lo), 120.f);
+        const float t = std::fmin(std::fmax(p.load / std::fmax(c.physicsSwordLoadForMax, 0.01f), 0.f), 1.f);
+        p.maxAngle = (lo + (hi - lo) * t) * 0.0174533f;
+    }
 
     PxTransform out(PxIdentity);
     if (!StepGuarded(&r, &p, &out)) {
@@ -297,13 +305,13 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     PxQuat dq = p.target.q.getConjugate() * out.q;
     const float ang = 2.f * std::acos(std::fmin(std::fabs(dq.w), 1.f)) * 57.2958f;
     r.lagSum += lag; r.angSum += ang; r.lagMax = std::fmax(r.lagMax, lag); r.angMax = std::fmax(r.angMax, ang); ++r.statN;
-    r.lastMass = p.weaponKg + p.handKg; r.lastForce = p.force; r.lastTorque = p.torque;
+    r.lastMass = p.weaponKg + p.handKg; r.lastForce = p.force; r.lastTorque = p.torque; r.lastLoad = p.load; r.lastCapDeg = p.maxAngle * 57.2958f;
     const double now = NowSec();
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg",
-                 h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg",
+                 h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
                  100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax);
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0;
     }

@@ -809,7 +809,12 @@ struct Config {
     float physicsSwordLinearDamper = 120.f;   // N*s/m
     float physicsSwordAngularSpring = 1500.f;  // N*m/rad
     float physicsSwordAngularDamper = 60.f;   // N*m*s/rad
-    float physicsSwordMaxAngleDeg = 35.f;     // the blade never trails the hand's aim by more than this (no runaway spins)
+    // How far the blade's aim may trail the wrist (no runaway spins), set by how heavy the weapon is for this arm:
+    // load = the weapon's gravity torque about the grip / the wrist torque (STR, two hands). Light for you -> MinAngle
+    // (precise), at or past SwordLoadForMax -> MaxAngle (it swings you).
+    float physicsSwordMinAngleDeg = 10.f;
+    float physicsSwordMaxAngleDeg = 45.f;
+    float physicsSwordLoadForMax = 0.6f;
     float physicsSwordSnapDistance = 0.6f;    // m: further than this from the controller, the grip snaps back
     bool  physicsSwordLog = true;             // lag summary every 5 s
 
