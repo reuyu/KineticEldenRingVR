@@ -18,7 +18,8 @@ struct ContactPart {
     uint8_t* chr;
     int side;              // 0 left, 1 right
     int kind;              // 0 upper arm, 1 forearm, 2 weapon (these block and swing); 3 torso, 4 head, 5 thigh, 6 calf
-                           // (the body: the blade cuts through, sticks in or glances off)
+                           // (the body: the blade cuts through, sticks in or glances off); 7 across the shoulders
+                           // (side 0) or hips (side 1). The trunk is two kind-3 capsules side by side.
     ervr::Vec3 a, b;       // capsule segment, world
     float radius;
     ervr::Vec3 axis[3];    // kind 2: the weapon bone's local x, y, z in the world (the blade lies along one of them)

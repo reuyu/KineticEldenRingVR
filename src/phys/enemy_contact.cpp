@@ -137,13 +137,13 @@ void ContactImpulse(uint32_t key, const Vec3& point, const Vec3& impulse) {
     for (const auto& p : g_parts) {
         if (p.key != key) continue;
         if (p.kind == 2) return;   // the weapon is a physics body of its own (ContactWeaponSim)
-        if (p.kind == 3 || p.kind == 4) {
+        if (p.kind == 3 || p.kind == 4 || (p.kind == 7 && p.side == 0)) {
             Torso* t = FindTorso(p.chr);
             if (t) t->angImpulse = t->angImpulse + (point - t->pivot).Cross(impulse);
             ++g_hits; g_maxImpulse = std::max(g_maxImpulse, impulse.Length());
             return;
         }
-        if (p.kind > 4) return;
+        if (p.kind > 4) return;   // legs and hips: solid, they do not sway
         Arm* a = FindArm(p.chr, p.side);
         if (!a) return;
         Vec3 L = (point - a->shoulder).Cross(impulse);
@@ -318,16 +318,33 @@ void ContactFrame(uint8_t* player, double now) {
         // glances on all of them).
         if (c.physicsBodyContact) {
             const int neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
-            if (pel >= 0 && neck >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), worldU(neck), 0.16f));
+            const float bs = std::min(std::max(c.physicsBodyScale, 0.3f), 3.f);
+            if (pel >= 0 && neck >= 0) {
+                // The trunk as it is drawn (armour included), not a stick down the spine: two upright capsules side
+                // by side from the hips to the shoulders (wide and not deep, like a chest), a bar across the
+                // shoulders and one across the hips.
+                const Vec3 P0 = world(pel), N0 = worldU(neck);
+                Vec3 axis = (N0 - P0).Normalized();
+                Vec3 lat = (ua[0] >= 0 && ua[1] >= 0) ? worldU(ua[0]) - worldU(ua[1]) : (TR * rootQ).Rotate(Vec3{1, 0, 0});
+                lat = (lat - axis * lat.Dot(axis)).Normalized();
+                const float off = 0.10f * bs, rr = 0.15f * bs;
+                const Vec3 lo = P0 + axis * 0.02f, hi = N0 - axis * 0.10f;
+                g_parts.push_back(MakePart(PartKey(t.chr, 0, 3), t.chr, 0, 3, lo + lat * off, hi + lat * off, rr));
+                g_parts.push_back(MakePart(PartKey(t.chr, 1, 3), t.chr, 1, 3, lo - lat * off, hi - lat * off, rr));
+                if (ua[0] >= 0 && ua[1] >= 0)
+                    g_parts.push_back(MakePart(PartKey(t.chr, 0, 7), t.chr, 0, 7, worldU(ua[0]), worldU(ua[1]), 0.11f * bs));
+                const int lt = TrackerBoneIndex(t.hkb, "L_Thigh"), rt = TrackerBoneIndex(t.hkb, "R_Thigh");
+                if (lt >= 0 && rt >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 1, 7), t.chr, 1, 7, world(lt), world(rt), 0.14f * bs));
+            }
             if (head >= 0) {
                 const Vec3 hp = worldU(head), up = (TR * rootQ).Rotate(Vec3{0, 1, 0});
-                g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f));
+                g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.10f, 0.13f * bs));
             }
             static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
             for (int s = 0; s < 2; ++s) {
                 const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
-                if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f));
-                if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f));
+                if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.10f * bs));
+                if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.08f * bs));
             }
             // Where the capsules are, in this enemy's own frame (x right, y up, z its forward as the model root
             // has it), next to your blade: if the blade passes through a body as if through air, this shows

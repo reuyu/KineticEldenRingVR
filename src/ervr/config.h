@@ -830,8 +830,8 @@ struct Config {
     std::string physicsEnemyWeaponAxis = "auto"; // its local axis along the blade (x|y|z, - to flip; auto = learned from the hits you take)
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     float physicsEnemyWeaponKg = 3.f;          // the enemy weapon as a physics body
-    float physicsEnemyArmForce = 800.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
-    float physicsEnemyArmTorque = 150.f;       // N*m about its grip
+    float physicsEnemyArmForce = 450.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
+    float physicsEnemyArmTorque = 90.f;        // N*m about its grip
     // Upper-body sway: blows on the torso and head turn the upper body about the pelvis and it springs back.
     bool  physicsTorsoSway = true;
     float physicsTorsoInertia = 4.f;           // kg*m^2 about the pelvis
@@ -843,6 +843,7 @@ struct Config {
     // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
     // first): >= BodyPierceEnergy goes in and can be pushed deeper against BodyFriction, and pulled back out.
     bool  physicsBodyContact = true;
+    float physicsBodyScale = 1.0f;            // thickness of the enemy body capsules (1 = an armoured soldier)
     float physicsBodyCutEnergy = 500.f;       // J
     float physicsBodyStickEnergy = 120.f;     // J
     float physicsBodyPierceEnergy = 80.f;     // J

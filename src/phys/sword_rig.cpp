@@ -172,7 +172,7 @@ struct Rig {
     float wDevMax = 0.f; int wHeld = 0;         // statistics
     double contactUntil = 0;                     // simTime: the blade touched something; it does not snap through
     int snaps = 0, bodyTouch = 0;
-    int kindTouch[7]{};                          // sub-steps the blade touched each kind of part
+    int kindTouch[8]{};                          // sub-steps the blade touched each kind of part
     float stepMs = 0.f; int stepN = 0;           // cost of the simulation
     double checkAt = 0;
 };
@@ -603,7 +603,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
             // still meets the blade); a blade on it makes it a driven body that can be held off.
             const PxTransform cur = r.enemy[k]->getGlobalPose();
             const float off = (cur.transform(PxVec3(r.wHalf[k], 0.f, 0.f)) - tk.transform(PxVec3(r.wHalf[k], 0.f, 0.f))).magnitude();
-            if (off > 0.8f) r.wContactUntil[k] = 0;   // pushed this far, the blade slipped past it
+            if (off > 1.5f) r.wContactUntil[k] = 0;   // a runaway (lost contact far off its path): back to the animation
             const bool touched = r.simTime < r.wContactUntil[k];
             if (!touched) {
                 if (r.wFree[k]) { r.enemy[k]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true); r.wFree[k] = false; r.enemy[k]->setGlobalPose(tk); }
@@ -632,7 +632,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
             if (r.acc[k].weight > wBefore[k]) {
                 r.contactUntil = r.simTime + 0.3;
                 if (r.slotKind[k] >= 3) ++r.bodyTouch;
-                if (r.slotKind[k] >= 0 && r.slotKind[k] < 7) ++r.kindTouch[r.slotKind[k]];
+                if (r.slotKind[k] >= 0 && r.slotKind[k] < 8) ++r.kindTouch[r.slotKind[k]];
                 if (r.wDyn[k]) r.wContactUntil[k] = r.simTime + 0.3;
             }
         ClassifyImpacts(r, p, preLin, preAng, h);
@@ -897,9 +897,9 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s) (touch sub-steps: upper arm %d, forearm %d, weapon %d, torso %d, head %d, thigh %d, calf %d); snapped back %d; simulation %.2f ms per step",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s) (touch sub-steps: upper arm %d, forearm %d, weapon %d, torso %d, head %d, thigh %d, calf %d, shoulders/hips %d); snapped back %d; simulation %.2f ms per step",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.kindTouch[0], r.kindTouch[1], r.kindTouch[2], r.kindTouch[3], r.kindTouch[4], r.kindTouch[5], r.kindTouch[6], r.snaps, r.stepN ? r.stepMs / r.stepN : 0.f);
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.kindTouch[0], r.kindTouch[1], r.kindTouch[2], r.kindTouch[3], r.kindTouch[4], r.kindTouch[5], r.kindTouch[6], r.kindTouch[7], r.snaps, r.stepN ? r.stepMs / r.stepN : 0.f);
         r.parries = r.armPushes = r.armHits = 0; r.wHeld = 0; r.wDevMax = 0.f; r.snaps = 0; r.bodyTouch = 0; for (int& t : r.kindTouch) t = 0; r.stepMs = 0.f; r.stepN = 0;
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0; r.cuts = r.sticks = r.pierces = r.glances = 0; r.energyMax = 0;
         if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
