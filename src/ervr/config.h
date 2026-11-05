@@ -830,8 +830,8 @@ struct Config {
     std::string physicsEnemyWeaponAxis = "auto"; // its local axis along the blade (x|y|z, - to flip; auto = learned from the hits you take)
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     float physicsEnemyWeaponKg = 3.f;          // the enemy weapon as a physics body
-    float physicsEnemyArmForce = 450.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
-    float physicsEnemyArmTorque = 90.f;        // N*m about its grip
+    float physicsEnemyArmForce = 200.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
+    float physicsEnemyArmTorque = 60.f;        // N*m about its grip
     // Upper-body sway: blows on the torso and head turn the upper body about the pelvis and it springs back.
     bool  physicsTorsoSway = true;
     float physicsTorsoInertia = 4.f;           // kg*m^2 about the pelvis

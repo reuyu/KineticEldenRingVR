@@ -31,14 +31,14 @@ bool PtrLike(uintptr_t v) { return v >= 0x10000 && v < 0x7FFFFFFFFFFFull && !(v 
 
 uintptr_t Ptr(uintptr_t at) {
     uintptr_t v = 0;
-    if (!PtrLike(at) || !ervr::ProbeRead((void*)at, &v, 8) || !PtrLike(v)) return 0;
+    if (!PtrLike(at) || !ervr::SafeRead((void*)at, &v, 8) || !PtrLike(v)) return 0;
     return v;
 }
 
 std::string NameAt(uintptr_t obj) {
     uintptr_t vt = 0, col = 0;
-    if (!PtrLike(obj) || !ervr::ProbeRead((void*)obj, &vt, 8) || !InModule(vt)) return {};
-    if (!ervr::ProbeRead((void*)(vt - 8), &col, 8) || !InModule(col)) return {};
+    if (!PtrLike(obj) || !ervr::SafeRead((void*)obj, &vt, 8) || !InModule(vt)) return {};
+    if (!ervr::SafeRead((void*)(vt - 8), &col, 8) || !InModule(col)) return {};
     return ervr::RttiNameOfVTable((void**)vt);
 }
 
@@ -48,19 +48,17 @@ bool Is(uintptr_t obj, const char* name) { return obj && NameAt(obj) == name; }
 bool Array(uintptr_t at, uintptr_t& data, int& n, int maxN) {
     data = Ptr(at);
     n = 0;
-    if (!data || !ervr::ProbeRead((void*)(at + 8), &n, 4)) return false;
+    if (!data || !ervr::SafeRead((void*)(at + 8), &n, 4)) return false;
     return n > 0 && n <= maxN;
 }
 
 std::string Str(uintptr_t p) {
     p &= ~(uintptr_t)1;   // hkStringPtr keeps a flag in bit 0
+    if (p < 0x10000 || p >= 0x7FFFFFFFFFFFull) return {};
+    // never across a page end: the next page may not be there
     char s[64] = {};
-    if (!PtrLike(p & ~(uintptr_t)7) || !ervr::ProbeRead((void*)p, s, sizeof(s) - 1)) {
-        // the tail may cross into an unreadable page: try shorter
-        if (!ervr::ProbeRead((void*)p, s, 16)) return {};
-        s[16] = 0;
-    }
-    s[sizeof(s) - 1] = 0;
+    const size_t room = 0x1000 - (p & 0xFFF);
+    if (!ervr::SafeRead((void*)p, s, room < sizeof(s) - 1 ? room : sizeof(s) - 1)) return {};
     return s;
 }
 
@@ -69,7 +67,7 @@ std::vector<std::string> BoneNames(uintptr_t skel) {
     uintptr_t d; int n;
     if (!Array(skel + 0x30, d, n, 1024)) return out;
     std::vector<uintptr_t> raw((size_t)n * 2);
-    if (!ervr::ProbeRead((void*)d, raw.data(), raw.size() * 8)) return out;
+    if (!ervr::SafeRead((void*)d, raw.data(), raw.size() * 8)) return out;
     out.resize(n);
     for (int i = 0; i < n; ++i) out[i] = Str(raw[(size_t)i * 2]);
     return out;
@@ -100,8 +98,21 @@ bool GameShapesRead(uint8_t* chr, uint8_t* hkb, std::vector<GameCapsule>& out, s
 
     uintptr_t shp; int nb;
     if (!Array(data + 0x38, shp, nb, 64)) { why = "no shape array"; return false; }
+    // The array holds a small struct per body with the shape pointer first; find its size by where the shapes are.
     std::vector<uintptr_t> shapes(nb);
-    if (!ervr::ProbeRead((void*)shp, shapes.data(), (size_t)nb * 8)) { why = "shape array unreadable"; return false; }
+    int stride = 0;
+    for (int st : {8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128, 144, 160, 192, 256}) {
+        int good = 0;
+        for (int i = 0; i < nb; ++i) {
+            const uintptr_t sp = Ptr(shp + (uintptr_t)i * st);
+            shapes[i] = sp;
+            const std::string nm = sp ? NameAt(sp) : std::string();
+            if (nm.rfind("hknp", 0) == 0 && nm.find("Shape") != std::string::npos) ++good;
+            else if (i < 2) break;
+        }
+        if (good >= nb - 1 && good > 0) { stride = st; break; }
+    }
+    if (!stride) { why = "shape array layout unknown"; return false; }
     const std::vector<std::string> rnames = BoneNames(rskel);
     const int nr = (int)rnames.size();
     if (nr < 1) { why = "ragdoll skeleton has no bones"; return false; }
@@ -112,7 +123,7 @@ bool GameShapesRead(uint8_t* chr, uint8_t* hkb, std::vector<GameCapsule>& out, s
         uintptr_t d; int n; bool ok = false;
         if (Array(data + 0x70, d, n, 1024) && n == nr) {
             std::vector<int> m(n);
-            if (ervr::ProbeRead((void*)d, m.data(), (size_t)n * 4)) {
+            if (ervr::SafeRead((void*)d, m.data(), (size_t)n * 4)) {
                 ok = true;
                 for (int v : m) if (v < -1 || v >= nb) { ok = false; break; }
                 if (ok) boneBody = m;
@@ -135,7 +146,7 @@ bool GameShapesRead(uint8_t* chr, uint8_t* hkb, std::vector<GameCapsule>& out, s
         uintptr_t d; int n;
         if (anames.empty() || !Array(m + 0x60, d, n, 1024)) continue;
         std::vector<float> raw((size_t)n * 16);
-        if (!ervr::ProbeRead((void*)d, raw.data(), raw.size() * 4)) continue;
+        if (!ervr::SafeRead((void*)d, raw.data(), raw.size() * 4)) continue;
         for (int i = 0; i < n; ++i) {
             const float* e = &raw[(size_t)i * 16];
             int16_t ba, bb; std::memcpy(&ba, e, 2); std::memcpy(&bb, (const char*)e + 2, 2);
@@ -162,7 +173,7 @@ bool GameShapesRead(uint8_t* chr, uint8_t* hkb, std::vector<GameCapsule>& out, s
         const uintptr_t s = shapes[body];
         if (!Is(s, "hknpCapsuleShape")) { ++skipped; continue; }
         float f[32];
-        if (!ervr::ProbeRead((void*)s, f, sizeof(f))) { ++skipped; continue; }
+        if (!ervr::SafeRead((void*)s, f, sizeof(f))) { ++skipped; continue; }
         GameCapsule c;
         c.radius = f[8];
         c.a = Vec3{f[24], f[25], f[26]};
@@ -174,7 +185,7 @@ bool GameShapesRead(uint8_t* chr, uint8_t* hkb, std::vector<GameCapsule>& out, s
         out.push_back(c);
     }
     if (out.empty()) { why = "no capsule could be placed (" + std::to_string(nb) + " bodies, " + std::to_string(mapped) + " mapped)"; return false; }
-    why = std::to_string(out.size()) + " of " + std::to_string(nb) + " bodies, " + std::to_string(mapped) + " via the mapper, " + std::to_string(skipped) + " skipped";
+    why = std::to_string(out.size()) + " of " + std::to_string(nb) + " bodies (stride " + std::to_string(stride) + "), " + std::to_string(mapped) + " via the mapper, " + std::to_string(skipped) + " skipped";
     return true;
 }
 

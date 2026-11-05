@@ -49,6 +49,7 @@ struct Torso {
 // The game's own body capsules of an enemy (game_shapes), read once and kept while it stays near.
 struct Shapes {
     uint8_t* chr = nullptr;
+    double srcAt = -10.0;
     uintptr_t src = 0;            // its ragdoll data: a change means the character was reloaded
     bool ok = false, checked = false, seen = false;
     std::string why;
@@ -280,9 +281,11 @@ void ContactFrame(uint8_t* player, double now) {
         Shapes* shp = nullptr;
         if (c.physicsBodyContact && c.physicsGameShapes) {
             for (auto& sh : g_shapes) if (sh.chr == t.chr) { shp = &sh; break; }
-            const uintptr_t src = GameShapesSource(t.chr);
             if (!shp) { g_shapes.push_back(Shapes{}); shp = &g_shapes.back(); shp->chr = t.chr; shp->src = ~(uintptr_t)0; }
             shp->seen = true;
+            // Twice a second is enough to notice a reloaded character.
+            const uintptr_t src = now - shp->srcAt >= 0.5 ? GameShapesSource(t.chr) : shp->src;
+            if (now - shp->srcAt >= 0.5) shp->srcAt = now;
             if (src != shp->src) {
                 shp->src = src; shp->checked = false;
                 shp->ok = src && GameShapesRead(t.chr, t.hkb, shp->caps, shp->why);
