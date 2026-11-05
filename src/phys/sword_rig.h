@@ -30,6 +30,10 @@ bool SwordRigStep(int h, ervr::Vec3& p, ervr::Quat& q, float dt, float weight, f
 // parry or a push is not a hit. Game thread.
 bool SwordRigHoldStrike(int h);
 
+// Keep the game from regenerating stamina for SwingRegenDelay after swing stamina was spent. Called from every
+// character-update point the physics layer hooks. Any thread.
+void SwordRigPinStamina();
+
 // Forget hand h's state (the next step starts exactly at the controller). h < 0: both hands.
 void SwordRigReset(int h = -1);
 

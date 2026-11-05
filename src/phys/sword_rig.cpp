@@ -23,6 +23,7 @@ bool SwordRigActive() { return false; }
 bool SwordRigStep(int, ervr::Vec3&, ervr::Quat&, float, float, float, float, float, ervr::Vec3) { return false; }
 void SwordRigReset(int) {}
 bool SwordRigHoldStrike(int) { return false; }
+void SwordRigPinStamina() {}
 
 #else
 
@@ -65,7 +66,7 @@ PxFilterFlags ContactFilter(PxFilterObjectAttributes, PxFilterData f0, PxFilterO
     // Only the blade against an enemy part makes contact (enemy parts are kinematic among themselves anyway).
     if (!((f0.word0 == kShapeBlade && f1.word0 == kShapeEnemy) || (f0.word0 == kShapeEnemy && f1.word0 == kShapeBlade)))
         return PxFilterFlag::eSUPPRESS;
-    pairFlags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS |
+    pairFlags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eDETECT_CCD_CONTACT | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS |
                 PxPairFlag::eNOTIFY_CONTACT_POINTS;
     return PxFilterFlag::eDEFAULT;
 }
@@ -164,12 +165,14 @@ struct Rig {
     // joint: the enemy's arm strength against yours decides whether your blade holds it off.
     PxRigidDynamic* wAnchor[kMaxParts]{};       // kinematic: where the animation wants the weapon
     PxD6Joint* wJoint[kMaxParts]{};
-    bool wDyn[kMaxParts]{};
+    bool wDyn[kMaxParts]{};                     // configured as a driven weapon (joint built)
+    bool wFree[kMaxParts]{};                    // currently a dynamic body (touched); kinematic otherwise
     float wHalf[kMaxParts]{};
     double wContactUntil[kMaxParts]{};          // simTime: free (not snapped to the animation) until then
     float wDevMax = 0.f; int wHeld = 0;         // statistics
     double contactUntil = 0;                     // simTime: the blade touched something; it does not snap through
     int snaps = 0, bodyTouch = 0;
+    int kindTouch[7]{};                          // sub-steps the blade touched each kind of part
 };
 Rig g_rig[2];
 
@@ -213,6 +216,7 @@ bool RigCreate(Rig& r) {
     desc.cpuDispatcher = g_dispatcher;
     desc.filterShader = ContactFilter;
     desc.simulationEventCallback = &g_sink;
+    desc.flags |= PxSceneFlag::eENABLE_CCD;
     r.scene = g_physics->createScene(desc);
     if (!r.scene) return false;
     r.anchor = g_physics->createRigidDynamic(PxTransform(PxIdentity));
@@ -225,6 +229,9 @@ bool RigCreate(Rig& r) {
     r.body->setMaxAngularVelocity(60.f);
     // A blade that starts inside an enemy part is eased out, not shot out.
     r.body->setMaxDepenetrationVelocity(3.f);
+    // Swept contacts: a fast enemy weapon must not pass through the blade between two sub-steps.
+    r.body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
+    r.body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
     r.blade = PxRigidActorExt::createExclusiveShape(*r.body, PxCapsuleGeometry(0.035f, 0.1f), *g_material);
     if (!r.blade) return false;
     r.blade->setSimulationFilterData(PxFilterData(kShapeBlade, 0, 0, 0));
@@ -366,7 +373,7 @@ void WeaponKinematic(Rig& r, int k) {
     if (!r.wDyn[k]) return;
     if (r.wJoint[k]) { r.wJoint[k]->release(); r.wJoint[k] = nullptr; }
     r.enemy[k]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true);
-    r.wDyn[k] = false;
+    r.wDyn[k] = false; r.wFree[k] = false;
 }
 
 void WeaponDynamic(Rig& r, const Params& p, int k, float half) {
@@ -380,13 +387,12 @@ void WeaponDynamic(Rig& r, const Params& p, int k, float half) {
     if (!r.wDyn[k]) {
         r.wAnchor[k]->setGlobalPose(r.slotTo[k]);
         b->setGlobalPose(r.slotTo[k]);
-        b->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, false);
         b->setActorFlag(PxActorFlag::eDISABLE_GRAVITY, true);
         b->setSleepThreshold(0.f);
         b->setSolverIterationCounts(16, 4);
         b->setMaxDepenetrationVelocity(2.f);
         b->setLinearVelocity(PxVec3(0.f)); b->setAngularVelocity(PxVec3(0.f));
-        r.wDyn[k] = true; r.wContactUntil[k] = 0; r.wHalf[k] = -1.f;
+        r.wDyn[k] = true; r.wFree[k] = false; r.wContactUntil[k] = 0; r.wHalf[k] = -1.f;
     }
     if (std::fabs(half - r.wHalf[k]) > 0.01f || !r.wJoint[k]) {
         r.wHalf[k] = half;
@@ -567,11 +573,10 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     if (!RigCreate(r)) return false;
     UpdateMass(r, p);
     UpdateDrives(r, p);
-    // A blade held back by an enemy is not snapped through it as soon as the hand gets ahead.
-    const float snap = r.simTime < r.contactUntil ? std::fmax(p.snap, 1.5f) : p.snap;
-    if (!r.placed || (r.body->getGlobalPose().p - p.target.p).magnitude() > snap) { if (r.placed) ++r.snaps; Place(r, p.target); }
+    if (!r.placed || (r.body->getGlobalPose().p - p.target.p).magnitude() > p.snap) { if (r.placed) ++r.snaps; Place(r, p.target); }
     // Move the controller anchor smoothly across sub-steps (<= 1/240 s each) so stiff drives stay stable.
-    const int n = (int)std::ceil(p.dt * 240.f) < 1 ? 1 : (int)std::ceil(p.dt * 240.f) > 8 ? 8 : (int)std::ceil(p.dt * 240.f);
+    // 480 Hz: an enemy weapon swung at 20 m/s moves 4 cm per sub-step, less than the two capsules' radii.
+    const int n = (int)std::ceil(p.dt * 480.f) < 1 ? 1 : (int)std::ceil(p.dt * 480.f) > 16 ? 16 : (int)std::ceil(p.dt * 480.f);
     const float h = p.dt / (float)n;
     SyncEnemies(r, p);
     for (int i = 0; i < kMaxParts; ++i) r.acc[i] = ContactAcc{};
@@ -592,14 +597,21 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
             const PxTransform tk(r.slotFrom[k].p * (1.f - t) + r.slotTo[k].p * t, (a * (1.f - t) + b * t).getNormalized());
             if (!r.wDyn[k]) { r.enemy[k]->setKinematicTarget(tk); continue; }
             r.wAnchor[k]->setKinematicTarget(tk);
-            // Untouched, the weapon is exactly where the animation has it; only a blade on it sets it free.
+            // Untouched, the weapon is kinematic and moves exactly as the animation has it (swept, so a fast swing
+            // still meets the blade); a blade on it makes it a driven body that can be held off.
             const PxTransform cur = r.enemy[k]->getGlobalPose();
             const float off = (cur.transform(PxVec3(r.wHalf[k], 0.f, 0.f)) - tk.transform(PxVec3(r.wHalf[k], 0.f, 0.f))).magnitude();
-            if (r.simTime >= r.wContactUntil[k] || off > 0.8f) {
-                if (off > 0.8f) r.wContactUntil[k] = 0;   // pushed this far, the blade slipped past it
-                r.enemy[k]->setGlobalPose(tk);
+            if (off > 0.8f) r.wContactUntil[k] = 0;   // pushed this far, the blade slipped past it
+            const bool touched = r.simTime < r.wContactUntil[k];
+            if (!touched) {
+                if (r.wFree[k]) { r.enemy[k]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true); r.wFree[k] = false; r.enemy[k]->setGlobalPose(tk); }
+                r.enemy[k]->setKinematicTarget(tk);
+            } else if (!r.wFree[k]) {
+                r.enemy[k]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, false);
+                r.enemy[k]->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
                 r.enemy[k]->setLinearVelocity((r.slotTo[k].p - r.slotFrom[k].p) * (1.f / std::fmax(p.dt, 1e-3f)));
                 r.enemy[k]->setAngularVelocity(PxVec3(0.f));
+                r.wFree[k] = true;
             }
         }
         // Body parts the blade is passing through (or stuck in) do not collide with it.
@@ -618,6 +630,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
             if (r.acc[k].weight > wBefore[k]) {
                 r.contactUntil = r.simTime + 0.3;
                 if (r.slotKind[k] >= 3) ++r.bodyTouch;
+                if (r.slotKind[k] >= 0 && r.slotKind[k] < 7) ++r.kindTouch[r.slotKind[k]];
                 if (r.wDyn[k]) r.wContactUntil[k] = r.simTime + 0.3;
             }
         ClassifyImpacts(r, p, preLin, preAng, h);
@@ -641,8 +654,8 @@ float g_stamDebt = 0.f;
 int g_stam = -1, g_stamMax = -1;
 double g_stamReadAt = -10;
 float g_stamSpent = 0.f, g_tiredMin = 1.f;
-double g_regenHoldUntil = 0;   // the game may not regenerate stamina before this (wall clock)
-int g_stamHeld = -1;            // the bar as our last drain left it
+std::atomic<double> g_regenHoldUntil{0.0};   // the game may not regenerate stamina before this (wall clock)
+std::atomic<int> g_stamHeld{-1};              // the bar as our last drain left it
 
 // Arm strength multiplier from how tired the player is (1 = fresh).
 float TiredFactor() {
@@ -651,15 +664,7 @@ float TiredFactor() {
     const double now = NowSec();
     // While the regeneration is held the bar is read and pinned on every step (a 20 Hz pin let the game's
     // regeneration show through as a flicker).
-    if (now - g_stamReadAt > 0.05 || now < g_regenHoldUntil) {
-        g_stamReadAt = now; g_stam = ervr::CombatPlayerStamina(&g_stamMax);
-        // Right after a swing the game's regeneration would refill the bar at once and the tired arm would never
-        // be felt: hold the bar where the swings left it for SwingRegenDelay (it may still fall).
-        if (now < g_regenHoldUntil && g_stamHeld >= 0 && g_stam >= 0) {
-            if (g_stam > g_stamHeld) { ervr::CombatSetPlayerStamina(g_stamHeld); g_stam = g_stamHeld; }
-            else g_stamHeld = g_stam;
-        }
-    }
+    if (now - g_stamReadAt > 0.05) { g_stamReadAt = now; g_stam = ervr::CombatPlayerStamina(&g_stamMax); }
     if (g_stam < 0 || g_stamMax <= 0) return 1.f;
     const float frac = (float)g_stam / (float)g_stamMax, below = std::fmax(c.physicsTiredBelow, 0.01f);
     if (frac >= below) return 1.f;
@@ -681,8 +686,8 @@ void DrainSwing(float tipSpeed, float weaponKg, float dt) {
     if (cur <= 0) { g_stamDebt = 0.f; return; }
     ervr::CombatSetPlayerStamina(cur - take);
     g_stam = cur - take < 0 ? 0 : cur - take; g_stamMax = maxS;
-    g_stamHeld = g_stam;
-    g_regenHoldUntil = NowSec() + std::fmax(c.physicsSwingRegenDelay, 0.f);
+    g_stamHeld.store(g_stam);
+    g_regenHoldUntil.store(NowSec() + std::fmax(c.physicsSwingRegenDelay, 0.f));
     g_stamSpent += (float)take;
 }
 
@@ -705,6 +710,20 @@ bool SwordRigActive() {
 }
 
 void SwordRigReset(int h) { g_resetMask.fetch_or(h < 0 ? 3 : (1 << (h & 1))); }
+
+void SwordRigPinStamina() {
+    // Right after a swing the game's regeneration would refill the bar at once and the tired arm would never be
+    // felt: the bar stays where the swings left it for SwingRegenDelay (it may still fall). Called from every
+    // point the game updates characters (pose hook, before and after model-pos), so no regenerated frame shows.
+    if (!ervr::Cfg().physicsSwingStamina || NowSec() >= g_regenHoldUntil.load()) return;
+    const int held = g_stamHeld.load();
+    if (held < 0) return;
+    int maxS = -1;
+    const int cur = ervr::CombatPlayerStamina(&maxS);
+    if (cur < 0) return;
+    if (cur > held) ervr::CombatSetPlayerStamina(held);
+    else if (cur < held) g_stamHeld.store(cur);
+}
 
 bool SwordRigHoldStrike(int h) {
     const auto& c = ervr::Cfg();
@@ -847,10 +866,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s); snapped back %d",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s) (touch sub-steps: upper arm %d, forearm %d, weapon %d, torso %d, head %d, thigh %d, calf %d); snapped back %d",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.snaps);
-        r.parries = r.armPushes = r.armHits = 0; r.wHeld = 0; r.wDevMax = 0.f; r.snaps = 0; r.bodyTouch = 0;
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.kindTouch[0], r.kindTouch[1], r.kindTouch[2], r.kindTouch[3], r.kindTouch[4], r.kindTouch[5], r.kindTouch[6], r.snaps);
+        r.parries = r.armPushes = r.armHits = 0; r.wHeld = 0; r.wDevMax = 0.f; r.snaps = 0; r.bodyTouch = 0; for (int& t : r.kindTouch) t = 0;
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0; r.cuts = r.sticks = r.pierces = r.glances = 0; r.energyMax = 0;
         if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
     }

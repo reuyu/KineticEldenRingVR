@@ -8,6 +8,7 @@
 #include "game_memory.h"
 #include "log.h"
 #include "pose_override.h"
+#include "sword_rig.h"
 #include "vrmath.h"
 
 #include <windows.h>
@@ -128,16 +129,19 @@ void PhysGameFrame(uint8_t* player, int pass) {
     }
     PoseOverrideWrite(0, nullptr);
     PoseOverrideLog();
+    SwordRigPinStamina();
 }
 
 void PhysBeforeModelPos(void* ctrl) {
     if (!g_enabled.load() || !ctrl) return;
     PoseOverrideWrite(1, ctrl);
+    SwordRigPinStamina();
 }
 
 void PhysAfterModelPos(void* ctrl) {
     if (!g_enabled.load() || !ctrl) return;
     PoseOverrideWrite(2, ctrl);
+    SwordRigPinStamina();
 }
 
 }  // namespace kinetic

@@ -36,8 +36,18 @@ struct Arm {
     bool seen = false;
 };
 
+// The upper body's sway away from its animation: a rotation vector about the pelvis, driven by blows on the
+// torso and head and springing back. Drawn by turning the Spine bone; the arms, weapon and head go with it.
+struct Torso {
+    uint8_t* chr = nullptr;
+    Vec3 theta{}, omega{}, pivot{}, angImpulse{};
+    bool seen = false;
+};
+
 std::mutex g_mtx;
 std::vector<Arm> g_arms;
+std::vector<Torso> g_torsos;
+double g_bodyLogAt = 0;
 std::vector<ContactPart> g_parts;
 double g_last = 0;
 // statistics for the 5 s log
@@ -46,6 +56,7 @@ int g_hits = 0;
 float g_maxImpulse = 0, g_maxSwingDeg = 0;
 int g_maxSwingNpc = 0, g_maxSwingSide = 0;
 int g_held = 0;   // frames an enemy weapon was held off by your blade
+float g_maxSwayDeg = 0;
 
 uint32_t PartKey(uint8_t* chr, int side, int kind) {
     const uint64_t a = (uint64_t)(uintptr_t)chr;
@@ -77,6 +88,11 @@ ContactPart MakePart(uint32_t key, uint8_t* chr, int side, int kind, const Vec3&
     return p;
 }
 
+Torso* FindTorso(uint8_t* chr) {
+    for (auto& t : g_torsos) if (t.chr == chr) return &t;
+    return nullptr;
+}
+
 Arm* FindArm(uint8_t* chr, int side) {
     for (auto& a : g_arms) if (a.chr == chr && a.side == side) return &a;
     return nullptr;
@@ -106,7 +122,7 @@ bool ModelPose(uint8_t* chr, uint8_t* hkb, int n, const std::vector<int16_t>& pa
 
 void ContactReset() {
     std::lock_guard<std::mutex> lock(g_mtx);
-    g_arms.clear(); g_parts.clear(); g_last = 0;
+    g_arms.clear(); g_torsos.clear(); g_parts.clear(); g_last = 0;
 }
 
 int ContactParts(ContactPart* out, int max) {
@@ -121,6 +137,13 @@ void ContactImpulse(uint32_t key, const Vec3& point, const Vec3& impulse) {
     for (const auto& p : g_parts) {
         if (p.key != key) continue;
         if (p.kind == 2) return;   // the weapon is a physics body of its own (ContactWeaponSim)
+        if (p.kind == 3 || p.kind == 4) {
+            Torso* t = FindTorso(p.chr);
+            if (t) t->angImpulse = t->angImpulse + (point - t->pivot).Cross(impulse);
+            ++g_hits; g_maxImpulse = std::max(g_maxImpulse, impulse.Length());
+            return;
+        }
+        if (p.kind > 4) return;
         Arm* a = FindArm(p.chr, p.side);
         if (!a) return;
         Vec3 L = (point - a->shoulder).Cross(impulse);
@@ -152,7 +175,7 @@ void ContactFrame(uint8_t* player, double now) {
     const auto& c = ervr::Cfg();
     std::lock_guard<std::mutex> lock(g_mtx);
     g_parts.clear();
-    if (!c.physicsContact || !player) { g_arms.clear(); return; }
+    if (!c.physicsContact || !player) { g_arms.clear(); g_torsos.clear(); return; }
     const float dt = g_last > 0 ? (float)std::min(std::max(now - g_last, 0.0), 0.05) : 0.f;
     g_last = now;
 
@@ -169,6 +192,11 @@ void ContactFrame(uint8_t* player, double now) {
     }
 
     for (auto& a : g_arms) a.seen = false;
+    for (auto& t : g_torsos) t.seen = false;
+    const float tI = std::max(c.physicsTorsoInertia, 0.1f), tK = std::max(c.physicsTorsoStiffness, 0.f);
+    const float tD = 2.f * std::max(c.physicsTorsoDamping, 0.f) * std::sqrt(tK * tI);
+    const float tMax = std::min(std::max(c.physicsTorsoMaxDeg, 0.f), 60.f) * 0.0174533f;
+    bool bodyLogged = false;
     std::vector<Quat> mq; std::vector<Vec3> mp;
     int enemies = 0;
     for (const TrackedChr& t : TrackerList()) {
@@ -186,20 +214,53 @@ void ContactFrame(uint8_t* player, double now) {
         if (!ModelPose(t.chr, t.hkb, (int)par->size(), *par, mq, mp)) continue;
         ++enemies;
         auto world = [&](int b) { return rootP + rootQ.Rotate(mp[b]); };
+        // Upper-body sway (torso and head blows): about the pelvis, drawn on the Spine bone.
+        const int pel = TrackerBoneIndex(t.hkb, "Pelvis"), spine = TrackerBoneIndex(t.hkb, "Spine");
+        Quat TR{};
+        Vec3 P{};
+        if (pel >= 0 && spine >= 0 && c.physicsTorsoSway) {
+            Torso* tr = FindTorso(t.chr);
+            if (!tr) { g_torsos.push_back(Torso{}); tr = &g_torsos.back(); tr->chr = t.chr; }
+            tr->seen = true;
+            P = world(pel); tr->pivot = P;
+            if (dt > 0.f) {
+                tr->omega = tr->omega + tr->angImpulse * (1.f / tI);
+                tr->omega = tr->omega + (tr->theta * -tK - tr->omega * tD) * (dt / tI);
+                tr->theta = tr->theta + tr->omega * dt;
+                const float ang = tr->theta.Length();
+                if (ang > tMax && ang > 1e-6f) {
+                    const Vec3 dir = tr->theta * (1.f / ang);
+                    tr->theta = dir * tMax;
+                    const float out = tr->omega.Dot(dir);
+                    if (out > 0.f) tr->omega = tr->omega - dir * out;
+                }
+            }
+            tr->angImpulse = Vec3{};
+            TR = FromRotVec(tr->theta);
+            g_maxSwayDeg = std::max(g_maxSwayDeg, tr->theta.Length() * 57.2958f);
+            if (tr->theta.Length() > 0.0035f) {
+                const int pp = (*par)[spine];
+                const Quat Mp = pp >= 0 ? mq[pp] : Quat{};
+                const Quat Rm = (rootQ.Conj() * TR * rootQ).Normalized();
+                PoseOverrideAdd(t.chr, t.hkb, spine, (Mp.Conj() * Rm * Mp).Normalized(), Quat{});
+            }
+        }
+        // Upper-body bones in the world with the sway applied.
+        auto worldU = [&](int b) { return P + TR.Rotate(world(b) - P); };
         for (int s = 0; s < 2; ++s) {
             if (ua[s] < 0 || fa[s] < 0 || hd[s] < 0) continue;
             Arm* a = FindArm(t.chr, s);
             if (!a) { g_arms.push_back(Arm{}); a = &g_arms.back(); a->chr = t.chr; a->side = s; }
             a->seen = true; a->npcId = t.npcId;
-            const Vec3 S = world(ua[s]);
+            const Vec3 S = worldU(ua[s]);
             a->shoulder = S;
-            a->axisDir = (world(fa[s]) - S).Normalized();
+            a->axisDir = (worldU(fa[s]) - S).Normalized();
             // The weapon as the animation wants it.
             const bool hasWeapon = s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f;
             Vec3 W0{}, T0{}; Quat wq0{};
             if (hasWeapon) {
-                W0 = world(wb);
-                wq0 = (rootQ * mq[wb]).Normalized();
+                W0 = worldU(wb);
+                wq0 = (TR * rootQ * mq[wb]).Normalized();
                 T0 = W0 + wq0.Rotate(weaponAxis) * c.physicsEnemyWeaponLength;
             }
             const bool held = hasWeapon && now - a->simAt < 0.1;
@@ -233,11 +294,11 @@ void ContactFrame(uint8_t* player, double now) {
             if (swingDeg > g_maxSwingDeg) { g_maxSwingDeg = swingDeg; g_maxSwingNpc = t.npcId; g_maxSwingSide = s; }
             const Quat R = FromRotVec(a->theta);
             auto swung = [&](const Vec3& p) { return S + R.Rotate(p - S); };
-            const Vec3 E = swung(world(fa[s])), H = swung(world(hd[s]));
-            g_parts.push_back(MakePart(PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.08f));
-            g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.065f));
+            const Vec3 E = swung(worldU(fa[s])), H = swung(worldU(hd[s]));
+            g_parts.push_back(MakePart(PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f));
+            g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f));
             if (hasWeapon) {
-                ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.035f);
+                ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.05f);
                 wp.length = c.physicsEnemyWeaponLength;
                 wp.da = swung(W0); wp.db = held ? a->simTip : swung(T0);
                 const Quat wq = (R * wq0).Normalized();
@@ -253,29 +314,48 @@ void ContactFrame(uint8_t* player, double now) {
                 PoseOverrideAdd(t.chr, t.hkb, ua[s], (Mp.Conj() * Rm * Mp).Normalized(), Quat{});
             }
         }
-        // The body: torso, head, thighs and calves. These do not swing; the blade cuts, sticks or glances on them.
+        // The body: torso and head (they sway the upper body), thighs and calves (solid; the blade cuts, sticks or
+        // glances on all of them).
         if (c.physicsBodyContact) {
-            const int pel = TrackerBoneIndex(t.hkb, "Pelvis"), neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
-            if (pel >= 0 && neck >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.21f));
+            const int neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
+            if (pel >= 0 && neck >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), worldU(neck), 0.16f));
             if (head >= 0) {
-                const Vec3 hp = world(head), up = rootQ.Rotate(Vec3{0, 1, 0});
-                g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.13f));
+                const Vec3 hp = worldU(head), up = (TR * rootQ).Rotate(Vec3{0, 1, 0});
+                g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f));
             }
             static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
             for (int s = 0; s < 2; ++s) {
                 const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
-                if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.10f));
-                if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.075f));
+                if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f));
+                if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f));
+            }
+            // Where the capsules are, in this enemy's own frame (x right, y up, z its forward as the model root
+            // has it), next to your blade: if the blade passes through a body as if through air, this shows
+            // whether the capsule is somewhere else.
+            if (c.physicsContactLog && !bodyLogged && now - g_bodyLogAt >= 3.0 && t.distance < 2.5f && neck >= 0 && pel >= 0) {
+                bodyLogged = true; g_bodyLogAt = now;
+                const Quat inv = rootQ.Conj();
+                auto L = [&](const Vec3& w) { return inv.Rotate(w - rootP); };
+                const Vec3 pv = L(world(pel)), nk = L(worldU(neck)), hdp = head >= 0 ? L(worldU(head)) : Vec3{};
+                const Vec3 rs = ua[1] >= 0 ? L(worldU(ua[1])) : Vec3{}, rh = hd[1] >= 0 ? L(worldU(hd[1])) : Vec3{};
+                Vec3 g{}, tp{}; const bool blade = ervr::GameERBladeWorld(1, &g, &tp);
+                const Vec3 bg = blade ? L(g) : Vec3{}, bt = blade ? L(tp) : Vec3{};
+                Vec3 feet; Quat pq; const bool pl = ervr::GameERChrModelRoot(player, &feet, &pq);
+                const Vec3 me = pl ? L(feet) : Vec3{};
+                LOGI("[phys] body check npc %d at %.1f m (its frame, m): pelvis (%.2f %.2f %.2f) neck (%.2f %.2f %.2f) head (%.2f %.2f %.2f) R shoulder (%.2f %.2f %.2f) R hand (%.2f %.2f %.2f) | your feet (%.2f %.2f %.2f) blade grip (%.2f %.2f %.2f) tip (%.2f %.2f %.2f)%s | root pose: model bone 0 at (%.2f %.2f %.2f)",
+                     t.npcId, t.distance, pv.x, pv.y, pv.z, nk.x, nk.y, nk.z, hdp.x, hdp.y, hdp.z, rs.x, rs.y, rs.z, rh.x, rh.y, rh.z,
+                     me.x, me.y, me.z, bg.x, bg.y, bg.z, bt.x, bt.y, bt.z, blade ? "" : " (no blade)", mp[0].x, mp[0].y, mp[0].z);
             }
         }
     }
+    g_torsos.erase(std::remove_if(g_torsos.begin(), g_torsos.end(), [](const Torso& t) { return !t.seen; }), g_torsos.end());
     g_arms.erase(std::remove_if(g_arms.begin(), g_arms.end(), [](const Arm& a) { return !a.seen; }), g_arms.end());
 
     if (now - g_logAt >= 5.0) {
         if (c.physicsContactLog && (enemies > 0 || g_hits > 0))
-            LOGI("[phys] contact: %d enemy(ies), %d capsule(s); blade contacts %d (largest impulse %.1f N*s); largest arm swing %.0f deg (npc %d %s arm); weapon held off by your blade %d frame(s)",
-                 enemies, (int)g_parts.size(), g_hits, g_maxImpulse, g_maxSwingDeg, g_maxSwingNpc, g_maxSwingSide ? "right" : "left", g_held);
-        g_logAt = now; g_hits = 0; g_held = 0; g_maxImpulse = 0; g_maxSwingDeg = 0;
+            LOGI("[phys] contact: %d enemy(ies), %d capsule(s); blade contacts %d (largest impulse %.1f N*s); largest arm swing %.0f deg (npc %d %s arm); weapon held off by your blade %d frame(s); largest upper-body sway %.0f deg",
+                 enemies, (int)g_parts.size(), g_hits, g_maxImpulse, g_maxSwingDeg, g_maxSwingNpc, g_maxSwingSide ? "right" : "left", g_held, g_maxSwayDeg);
+        g_logAt = now; g_hits = 0; g_held = 0; g_maxSwayDeg = 0; g_maxImpulse = 0; g_maxSwingDeg = 0;
     }
 }
 

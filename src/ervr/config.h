@@ -832,6 +832,12 @@ struct Config {
     float physicsEnemyWeaponKg = 3.f;          // the enemy weapon as a physics body
     float physicsEnemyArmForce = 800.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
     float physicsEnemyArmTorque = 150.f;       // N*m about its grip
+    // Upper-body sway: blows on the torso and head turn the upper body about the pelvis and it springs back.
+    bool  physicsTorsoSway = true;
+    float physicsTorsoInertia = 4.f;           // kg*m^2 about the pelvis
+    float physicsTorsoStiffness = 200.f;       // N*m/rad
+    float physicsTorsoDamping = 1.0f;
+    float physicsTorsoMaxDeg = 20.f;
     bool  physicsContactLog = true;
     // The body (torso, head, thighs, calves): a blow's energy at contact (0.5 m v^2 of the blade, x STR/16 scaling)
     // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
