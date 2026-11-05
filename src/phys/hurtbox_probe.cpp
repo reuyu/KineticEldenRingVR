@@ -385,6 +385,41 @@ uint32_t DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
     return haveMask ? mask : 0u;
 }
 
+// The mesh table behind CSFD4FlverModelData (+0x88, 0x40-byte entries; the node each mesh hangs on is the int16
+// at +0x36): one line per mesh with the node's name and the entry's bytes after its first float4, to see which
+// field (if any) carries the modelDispMask bit of the weapon meshes.
+void DumpMeshTable(uintptr_t fl, int npc, int param, uint32_t mask) {
+    if (!PtrLike(fl)) return;
+    int32_t n = 0;
+    ervr::SafeRead((void*)(fl + 0x18), &n, 4);
+    uintptr_t names = 0, mt = 0;
+    ervr::SafeRead((void*)(fl + 0x30), &names, 8);
+    ervr::SafeRead((void*)(fl + 0x88), &mt, 8);
+    int32_t hdr[8] = {};
+    ervr::SafeRead((void*)(fl + 0x80), hdr, sizeof(hdr));
+    LOGI("[dmy] meshes npc %d param %d mask 0x%08x: %d nodes, table %p, flverdata+0x80..0x9f ints %d %d %d %d %d %d %d %d", npc, param, mask, n, (void*)mt,
+         hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7]);
+    if (n < 1 || n > 4000 || !PtrLike(names) || !PtrLike(mt)) return;
+    std::vector<uint16_t> w(0x8000);
+    size_t got = 0;
+    for (size_t c = 0x8000; c >= 0x400; c /= 2) if (ervr::SafeRead((void*)names, w.data(), c * 2)) { got = c; break; }
+    std::vector<std::string> nm;
+    for (size_t k = 0; (int)nm.size() < n && k < got;) {
+        std::string x;
+        while (k < got && w[k]) { x += (char)(w[k] < 128 ? w[k] : '?'); ++k; }
+        ++k; nm.push_back(x);
+    }
+    for (int i = 0; i < 400; ++i) {
+        uint8_t e[0x40];
+        if (!ervr::SafeRead((void*)(mt + (uintptr_t)i * 0x40), e, sizeof(e))) break;
+        int16_t node; std::memcpy(&node, e + 0x36, 2);
+        if (node < 0 || node >= n) { LOGI("[dmy] meshes npc %d param %d: %d entries (entry %d has node %d)", npc, param, i, i, node); break; }
+        std::string hex;
+        for (int b = 0x10; b < 0x40; ++b) { char h[4]; snprintf(h, sizeof(h), "%02x", e[b]); hex += h; if ((b & 3) == 3) hex += ' '; }
+        LOGI("[dmy] mesh %d param %d #%d node %d %s: %s", npc, param, i, node, node < (int)nm.size() ? nm[node].c_str() : "?", hex.c_str());
+    }
+}
+
 // Snapshots of each probed enemy's memory: offsets whose value is the same for every enemy with the same
 // modelDispMask and differs between masks are where the shown meshes may be kept.
 struct Snap { int param; uint32_t mask; std::vector<std::vector<uint8_t>> reg; };
@@ -392,7 +427,7 @@ std::vector<Snap> g_snaps;
 const char* kRegName[5] = {"chr", "modelins", "item", "flverdata", "meshtable(flverdata+0x88)"};
 const size_t kRegLen[5] = {0x2000, 0x1000, 0x1000, 0x200, 0x4000};
 
-void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int param, uint32_t mask, int npc) {
+[[maybe_unused]] void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int param, uint32_t mask, int npc) {
     Snap sn{param, mask, {}};
     uintptr_t mt = 0;
     if (PtrLike(fl)) ervr::SafeRead((void*)(fl + 0x88), &mt, 8);
@@ -456,7 +491,7 @@ void DummyProbeFrame() {
             ervr::SafeRead((void*)(item + 0x68), &fl, 8);
             ervr::SafeRead((void*)(item + 0x650), &dm, 8);
             const uint32_t mask = DumpMeshMask(t.chr, item, fl, t.npcId);
-            SnapAndDiff(t.chr, mi, item, fl, paramId, mask, t.npcId);
+            DumpMeshTable(fl, t.npcId, paramId, mask);
         }
         return;   // one per frame
     }
