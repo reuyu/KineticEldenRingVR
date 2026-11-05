@@ -5,6 +5,7 @@
 #include "game_er.h"
 #include "game_memory.h"
 #include "log.h"
+#include "params_er.h"
 #include "rtti.h"
 
 #include <windows.h>
@@ -297,7 +298,7 @@ void DumpObj(uintptr_t obj, const std::string& path, int npc, int depth) {
 // CSFD4FlverModelData, from probe v2: +0x18 int32 count (409 for npc 4311) and int32 (178), +0x20 a table of
 // 0x30-byte entries (two float4 with w = 1, a pointer, four int16), +0x30 the bone names as UTF-16 strings one
 // after another. Dump all of it: every entry (both float4, the pointer, the int16s) and every name with its index.
-void DumpDummyTable(uintptr_t fl, int npc) {
+[[maybe_unused]] void DumpDummyTable(uintptr_t fl, int npc) {
     if (!PtrLike(fl)) return;
     int32_t cnt[2] = {};
     uintptr_t tab = 0, names = 0;
@@ -339,6 +340,72 @@ void DumpDummyTable(uintptr_t fl, int npc) {
     }
 }
 
+// Which weapon mesh is shown. Evidence to collect:
+//  - the NpcParam row's modelDispMask0..31 (bits at 0x14A..0x14D, eldenring-rs NPC_PARAM_ST bits_14a..);
+//  - every UTF-16 text table CSFD4FlverModelData points at (material / mesh names carry "#NN#" mask ids);
+//  - the small int tables it points at (mesh -> node), dumped whole;
+//  - where in CSFD4ModelItem / CSChrModelIns / ChrIns the same 32-bit mask sits at run time.
+void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
+    uint32_t mask = 0; bool haveMask = false;
+    for (int pi = 0; pi < 200; ++pi) {
+        const char* sn = ervr::ParamsStructName(pi);
+        if (!sn || std::strcmp(sn, "NPC_PARAM_ST") != 0) continue;
+        uint32_t sz = 0;
+        uint8_t* row = ervr::ParamsRow(pi, (uint32_t)npc, &sz);
+        if (row && sz > 0x14E && ervr::SafeRead(row + 0x14A, &mask, 4)) haveMask = true;
+        LOGI("[dmy] npc %d: NpcParam (holder %d) row %p size %u, modelDispMask bits 0x%08x%s", npc, pi, (void*)row, sz, mask, haveMask ? "" : " (unread)");
+        break;
+    }
+    if (!haveMask) LOGI("[dmy] npc %d: NpcParam not found", npc);
+    // the mask at run time
+    auto findMask = [&](const char* what, uintptr_t base, size_t len) {
+        if (!haveMask || !PtrLike(base)) return;
+        std::vector<uint8_t> b(len);
+        if (!ervr::SafeRead((void*)base, b.data(), len)) return;
+        for (size_t o = 0; o + 4 <= len; ++o) {
+            uint32_t v; std::memcpy(&v, &b[o], 4);
+            if (v == mask && mask != 0) LOGI("[dmy] npc %d: mask value at %s+0x%zx", npc, what, o);
+        }
+    };
+    uintptr_t mi = 0; ervr::SafeRead(chr + 0x50, &mi, 8);
+    findMask("chr", (uintptr_t)chr, 0x1000);
+    findMask("modelins", mi, 0x400);
+    findMask("item", item, 0x700);
+    findMask("flverdata", fl, 0x200);
+    // text tables and int tables behind flverdata
+    uintptr_t q[0x40] = {};
+    if (!PtrLike(fl) || !ervr::SafeRead((void*)fl, q, sizeof(q))) return;
+    for (int i = 1; i < 0x40; ++i) {
+        const uintptr_t v = q[i];
+        if (!PtrLike(v) || InModule(v) || !NameAt(v).empty()) continue;
+        std::vector<uint16_t> w(0x2000);
+        if (!ervr::SafeRead((void*)v, w.data(), w.size() * 2)) {
+            w.resize(0x100);
+            if (!ervr::SafeRead((void*)v, w.data(), w.size() * 2)) continue;
+        }
+        int printable = 0;
+        for (int k = 0; k < 64 && k < (int)w.size(); ++k) if ((w[k] >= 32 && w[k] < 127) || w[k] == 0) ++printable;
+        if (printable >= 60) {
+            std::string line; int idx = 0; size_t k = 0;
+            while (k < w.size() && idx < 600) {
+                std::string nm;
+                while (k < w.size() && w[k]) { nm += (char)(w[k] < 128 ? w[k] : '?'); ++k; }
+                ++k;
+                if (nm.empty()) { if (k < w.size() && w[k] == 0) break; continue; }
+                if (nm.find('#') != std::string::npos || idx < 3) line += std::to_string(idx) + ":" + nm + " ";
+                ++idx;
+                if (line.size() > 1500) { LOGI("[dmy]   text flverdata+0x%x %s", i * 8, line.c_str()); line.clear(); }
+            }
+            LOGI("[dmy]   text flverdata+0x%x (%d strings; those with '#' shown): %s", i * 8, idx, line.c_str());
+        } else {
+            // a small-int table: dump the first 192 int16 values
+            std::string line;
+            for (int k = 0; k < 192 && k < (int)w.size(); ++k) line += std::to_string((int16_t)w[k]) + " ";
+            LOGI("[dmy]   ints flverdata+0x%x: %s", i * 8, line.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 void DummyProbeFrame() {
@@ -356,7 +423,7 @@ void DummyProbeFrame() {
             uintptr_t fl = 0, dm = 0;
             ervr::SafeRead((void*)(item + 0x68), &fl, 8);
             ervr::SafeRead((void*)(item + 0x650), &dm, 8);
-            DumpDummyTable(fl, t.npcId);
+            DumpMeshMask(t.chr, item, fl, t.npcId);
         }
         return;   // one per frame
     }
