@@ -294,6 +294,51 @@ void DumpObj(uintptr_t obj, const std::string& path, int npc, int depth) {
     }
 }
 
+// CSFD4FlverModelData, from probe v2: +0x18 int32 count (409 for npc 4311) and int32 (178), +0x20 a table of
+// 0x30-byte entries (two float4 with w = 1, a pointer, four int16), +0x30 the bone names as UTF-16 strings one
+// after another. Dump all of it: every entry (both float4, the pointer, the int16s) and every name with its index.
+void DumpDummyTable(uintptr_t fl, int npc) {
+    if (!PtrLike(fl)) return;
+    int32_t cnt[2] = {};
+    uintptr_t tab = 0, names = 0;
+    ervr::SafeRead((void*)(fl + 0x18), cnt, 8);
+    ervr::SafeRead((void*)(fl + 0x20), &tab, 8);
+    ervr::SafeRead((void*)(fl + 0x30), &names, 8);
+    LOGI("[dmy] npc %d flverdata %p: +0x18 = %d, +0x1C = %d, table %p, names %p", npc, (void*)fl, cnt[0], cnt[1], (void*)tab, (void*)names);
+    // names: consecutive NUL-terminated UTF-16 strings
+    if (PtrLike(names)) {
+        std::vector<wchar_t> w(0x4000);
+        if (ervr::SafeRead((void*)names, w.data(), w.size() * 2)) {
+            std::string line; int idx = 0; size_t i = 0;
+            while (i < w.size() && idx < 400) {
+                std::string nm;
+                while (i < w.size() && w[i]) { nm += (char)(w[i] < 128 ? w[i] : '?'); ++i; }
+                ++i;
+                if (nm.empty()) break;
+                line += std::to_string(idx++) + ":" + nm + " ";
+                if (line.size() > 1500) { LOGI("[dmy]   names %s", line.c_str()); line.clear(); }
+            }
+            if (!line.empty()) LOGI("[dmy]   names %s", line.c_str());
+            LOGI("[dmy]   %d names", idx);
+        }
+    }
+    const int n = cnt[0] > 0 && cnt[0] <= 2000 ? cnt[0] : 0;
+    for (int k = 0; k < n && PtrLike(tab); ++k) {
+        float f[12];
+        if (!ervr::SafeRead((void*)(tab + (uintptr_t)k * 0x30), f, sizeof(f))) break;
+        uintptr_t ptr; std::memcpy(&ptr, &f[8], 8);
+        int16_t h[4]; std::memcpy(h, &f[10], 8);
+        // what the pointer holds: 8 int32 and as UTF-16 text
+        int32_t pv[8] = {}; std::string txt;
+        if (PtrLike(ptr) && ervr::SafeRead((void*)ptr, pv, sizeof(pv))) {
+            const wchar_t* wc = (const wchar_t*)pv;
+            for (int j = 0; j < 16 && wc[j] >= 32 && wc[j] < 127; ++j) txt += (char)wc[j];
+        }
+        LOGI("[dmy]   e%d a (%.4f %.4f %.4f %.3g) b (%.4f %.4f %.4f %.3g) p %p [%d %d %d %d %d %d %d %d '%s'] i16 %d %d %d %d", k, f[0], f[1], f[2], f[3],
+             f[4], f[5], f[6], f[7], (void*)ptr, pv[0], pv[1], pv[2], pv[3], pv[4], pv[5], pv[6], pv[7], txt.c_str(), h[0], h[1], h[2], h[3]);
+    }
+}
+
 }  // namespace
 
 void DummyProbeFrame() {
@@ -311,8 +356,7 @@ void DummyProbeFrame() {
             uintptr_t fl = 0, dm = 0;
             ervr::SafeRead((void*)(item + 0x68), &fl, 8);
             ervr::SafeRead((void*)(item + 0x650), &dm, 8);
-            DumpObj(fl, "flverdata", t.npcId, 0);
-            DumpObj(dm, "dmymod", t.npcId, 0);
+            DumpDummyTable(fl, t.npcId);
         }
         return;   // one per frame
     }
