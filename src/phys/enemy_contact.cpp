@@ -465,7 +465,7 @@ void ContactFrame(uint8_t* player, double now) {
             // Where the capsules are, in this enemy's own frame (x right, y up, z its forward as the model root
             // has it), next to your blade: if the blade passes through a body as if through air, this shows
             // whether the capsule is somewhere else.
-            if (c.physicsContactLog && !bodyLogged && now - g_bodyLogAt >= 3.0 && t.distance < 2.5f && neck >= 0 && pel >= 0) {
+            if (c.physicsContactLog && !bodyLogged && now - g_bodyLogAt >= 1.0 && t.distance < 2.5f && neck >= 0 && pel >= 0) {
                 bodyLogged = true; g_bodyLogAt = now;
                 const Quat inv = rootQ.Conj();
                 auto L = [&](const Vec3& w) { return inv.Rotate(w - rootP); };
@@ -478,6 +478,38 @@ void ContactFrame(uint8_t* player, double now) {
                 LOGI("[phys] body check npc %d at %.1f m (its frame, m): pelvis (%.2f %.2f %.2f) neck (%.2f %.2f %.2f) head (%.2f %.2f %.2f) R shoulder (%.2f %.2f %.2f) R hand (%.2f %.2f %.2f) | your feet (%.2f %.2f %.2f) blade grip (%.2f %.2f %.2f) tip (%.2f %.2f %.2f)%s | root pose: model bone 0 at (%.2f %.2f %.2f)",
                      t.npcId, t.distance, pv.x, pv.y, pv.z, nk.x, nk.y, nk.z, hdp.x, hdp.y, hdp.z, rs.x, rs.y, rs.z, rh.x, rh.y, rh.z,
                      me.x, me.y, me.z, bg.x, bg.y, bg.z, bt.x, bt.y, bt.z, blade ? "" : " (no blade)", mp[0].x, mp[0].y, mp[0].z);
+                // Where the enemy's weapon really is: your blade (both hands) in its right hand's frame. Lay your
+                // blade along its blade and the weapon's line shows here; the attach bones' offsets from the hand
+                // (logged once per enemy kind) say which one it hangs on and along which of its axes.
+                if (hd[1] >= 0) {
+                    const Vec3 Hp = world(hd[1]);
+                    const Quat Hi = (rootQ * mq[hd[1]]).Normalized().Conj();
+                    char bl[2][96] = {};
+                    for (int hh = 0; hh < 2; ++hh) {
+                        Vec3 g2{}, t2{};
+                        if (ervr::GameERBladeWorld(hh, &g2, &t2)) {
+                            const Vec3 a = Hi.Rotate(g2 - Hp), b = Hi.Rotate(t2 - Hp);
+                            snprintf(bl[hh], sizeof(bl[hh]), "grip (%.2f %.2f %.2f) tip (%.2f %.2f %.2f)", a.x, a.y, a.z, b.x, b.y, b.z);
+                        } else snprintf(bl[hh], sizeof(bl[hh]), "none");
+                    }
+                    LOGI("[phys] weapon calib npc %d: your blade in its R_Hand frame: L %s | R %s", t.npcId, bl[0], bl[1]);
+                    static std::set<int> s_wlogged;
+                    if (s_wlogged.insert(t.npcId).second) {
+                        std::string list;
+                        for (const char* nm : {"R_Weapon_Sword", "R_Weapon_Sword_large", "R_Weapon_Spear", "R_Weapon_Lucerne", "R_Weapon_Warpick", "R_Weapon_Crossbow", "R_Weapon_Whistle"}) {
+                            const int b = TrackerBoneIndex(t.hkb, nm);
+                            if (b < 0) continue;
+                            const Vec3 o = Hi.Rotate(world(b) - Hp);
+                            const Quat q = (Hi * rootQ * mq[b]).Normalized();
+                            const Vec3 x = q.Rotate(Vec3{1, 0, 0}), y = q.Rotate(Vec3{0, 1, 0}), z = q.Rotate(Vec3{0, 0, 1});
+                            char e[200];
+                            snprintf(e, sizeof(e), " %s at (%.2f %.2f %.2f) x(%.2f %.2f %.2f) y(%.2f %.2f %.2f) z(%.2f %.2f %.2f);", nm, o.x, o.y, o.z,
+                                     x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z);
+                            list += e;
+                        }
+                        LOGI("[phys] weapon bones npc %d (in its R_Hand frame):%s", t.npcId, list.c_str());
+                    }
+                }
             }
         }
     }
