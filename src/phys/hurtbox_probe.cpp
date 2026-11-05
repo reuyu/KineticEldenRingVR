@@ -345,7 +345,7 @@ void DumpObj(uintptr_t obj, const std::string& path, int npc, int depth) {
 //  - every UTF-16 text table CSFD4FlverModelData points at (material / mesh names carry "#NN#" mask ids);
 //  - the small int tables it points at (mesh -> node), dumped whole;
 //  - where in CSFD4ModelItem / CSChrModelIns / ChrIns the same 32-bit mask sits at run time.
-void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
+uint32_t DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
     uint32_t mask = 0; bool haveMask = false;
     for (int pi = 0; pi < 200; ++pi) {
         const char* sn = ervr::ParamsStructName(pi);
@@ -381,74 +381,59 @@ void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
     findMask("modelins", mi, 0x1000);
     findMask("item", item, 0x1000);
     findMask("flverdata", fl, 0x200);
-    // one level down from the model instance and item
-    for (const auto& base : {std::make_pair("modelins", mi), std::make_pair("item", item)}) {
-        uintptr_t q[0x80] = {};
-        if (!PtrLike(base.second) || !ervr::SafeRead((void*)base.second, q, sizeof(q))) continue;
-        for (int i = 1; i < 0x80; ++i) {
-            if (!PtrLike(q[i]) || InModule(q[i])) continue;
-            char nm[48]; snprintf(nm, sizeof(nm), "%s+0x%x->", base.first, i * 8);
-            findMask(nm, q[i], 0x400);
-        }
-    }
-    // single-byte strings behind flverdata with '#' (material names carry the mask bit as #NN#)
-    {
-        uintptr_t q2[0x40] = {};
-        if (PtrLike(fl) && ervr::SafeRead((void*)fl, q2, sizeof(q2)))
-            for (int i = 1; i < 0x40; ++i) {
-                if (!PtrLike(q2[i]) || InModule(q2[i])) continue;
-                std::vector<char> a(0x10000);
-                size_t got = 0;
-                for (size_t n = a.size(); n >= 0x100; n /= 4) if (ervr::SafeRead((void*)q2[i], a.data(), n)) { got = n; break; }
-                std::string line; int hashes = 0, strs = 0;
-                size_t k = 0;
-                while (k < got) {
-                    size_t e = k;
-                    while (e < got && a[e] >= 32 && a[e] < 127) ++e;
-                    if (e - k >= 4) {
-                        ++strs;
-                        std::string s(&a[k], e - k);
-                        if (s.find('#') != std::string::npos && line.size() < 3000) { line += s + " | "; ++hashes; }
-                    }
-                    k = e + 1;
-                }
-                if (hashes) LOGI("[dmy]   ascii flverdata+0x%x: %d strings, %d with '#': %s", i * 8, strs, hashes, line.c_str());
-            }
-    }
-    // text tables and int tables behind flverdata
-    uintptr_t q[0x40] = {};
-    if (!PtrLike(fl) || !ervr::SafeRead((void*)fl, q, sizeof(q))) return;
-    for (int i = 1; i < 0x40; ++i) {
-        const uintptr_t v = q[i];
-        if (!PtrLike(v) || InModule(v) || !NameAt(v).empty()) continue;
-        std::vector<uint16_t> w(0x2000);
-        if (!ervr::SafeRead((void*)v, w.data(), w.size() * 2)) {
-            w.resize(0x100);
-            if (!ervr::SafeRead((void*)v, w.data(), w.size() * 2)) continue;
-        }
-        int printable = 0;
-        for (int k = 0; k < 64 && k < (int)w.size(); ++k) if ((w[k] >= 32 && w[k] < 127) || w[k] == 0) ++printable;
-        if (printable >= 60) {
-            std::string line; int idx = 0; size_t k = 0;
-            while (k < w.size() && idx < 600) {
-                std::string nm;
-                while (k < w.size() && w[k]) { nm += (char)(w[k] < 128 ? w[k] : '?'); ++k; }
-                ++k;
-                if (nm.empty()) { if (k < w.size() && w[k] == 0) break; continue; }
-                if (nm.find('#') != std::string::npos || idx < 3) line += std::to_string(idx) + ":" + nm + " ";
-                ++idx;
-                if (line.size() > 1500) { LOGI("[dmy]   text flverdata+0x%x %s", i * 8, line.c_str()); line.clear(); }
-            }
-            LOGI("[dmy]   text flverdata+0x%x (%d strings; those with '#' shown): %s", i * 8, idx, line.c_str());
-        } else {
-            // a small-int table: dump the first 192 int16 values
-            std::string line;
-            for (int k = 0; k < 192 && k < (int)w.size(); ++k) line += std::to_string((int16_t)w[k]) + " ";
-            LOGI("[dmy]   ints flverdata+0x%x: %s", i * 8, line.c_str());
-        }
-    }
+    // (one level down from the model instance and item: nothing there either, 2026-11-05)
+    return haveMask ? mask : 0u;
 }
 
+// Snapshots of each probed enemy's memory: offsets whose value is the same for every enemy with the same
+// modelDispMask and differs between masks are where the shown meshes may be kept.
+struct Snap { int param; uint32_t mask; std::vector<std::vector<uint8_t>> reg; };
+std::vector<Snap> g_snaps;
+const char* kRegName[5] = {"chr", "modelins", "item", "flverdata", "meshtable(flverdata+0x88)"};
+const size_t kRegLen[5] = {0x2000, 0x1000, 0x1000, 0x200, 0x4000};
+
+void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int param, uint32_t mask, int npc) {
+    Snap sn{param, mask, {}};
+    uintptr_t mt = 0;
+    if (PtrLike(fl)) ervr::SafeRead((void*)(fl + 0x88), &mt, 8);
+    const uintptr_t base[5] = {(uintptr_t)chr, mi, item, fl, mt};
+    for (int r = 0; r < 5; ++r) {
+        std::vector<uint8_t> b(kRegLen[r], 0);
+        if (!PtrLike(base[r]) || !ervr::SafeRead((void*)base[r], b.data(), b.size())) b.clear();
+        sn.reg.push_back(std::move(b));
+    }
+    LOGI("[dmy] npc %d param %d: flverdata %p, mesh table %p", npc, param, (void*)fl, (void*)mt);
+    g_snaps.push_back(std::move(sn));
+    std::set<uint32_t> masks;
+    for (const auto& x : g_snaps) masks.insert(x.mask);
+    if (masks.size() < 2) return;
+    for (int r = 0; r < 5; ++r) {
+        size_t len = kRegLen[r];
+        bool all = true;
+        for (const auto& x : g_snaps) if (x.reg[r].size() != len) all = false;
+        if (!all) continue;
+        int shown = 0;
+        std::string line;
+        for (size_t o = 0; o < len && shown < 80; ++o) {
+            bool ok = true, differs = false;
+            for (size_t i = 0; i < g_snaps.size() && ok; ++i)
+                for (size_t j = i + 1; j < g_snaps.size() && ok; ++j) {
+                    const bool same = g_snaps[i].reg[r][o] == g_snaps[j].reg[r][o];
+                    if (g_snaps[i].mask == g_snaps[j].mask && !same) ok = false;
+                    if (g_snaps[i].mask != g_snaps[j].mask && !same) differs = true;
+                    if (g_snaps[i].mask != g_snaps[j].mask && same) ok = false;
+                }
+            if (!ok || !differs) continue;
+            char e[32]; snprintf(e, sizeof(e), " +0x%zx:", o);
+            line += e;
+            for (const auto& x : g_snaps) { char v[8]; snprintf(v, sizeof(v), "%02x/", x.reg[r][o]); line += v; }
+            ++shown;
+        }
+        std::string who;
+        for (const auto& x : g_snaps) { char v[48]; snprintf(v, sizeof(v), " %d(0x%08x)", x.param, x.mask); who += v; }
+        LOGI("[dmy] mask diff %s over%s: %d byte(s) follow the mask:%s", kRegName[r], who.c_str(), shown, line.c_str());
+    }
+}
 }  // namespace
 
 void DummyProbeFrame() {
@@ -470,7 +455,8 @@ void DummyProbeFrame() {
             uintptr_t fl = 0, dm = 0;
             ervr::SafeRead((void*)(item + 0x68), &fl, 8);
             ervr::SafeRead((void*)(item + 0x650), &dm, 8);
-            DumpMeshMask(t.chr, item, fl, t.npcId);
+            const uint32_t mask = DumpMeshMask(t.chr, item, fl, t.npcId);
+            SnapAndDiff(t.chr, mi, item, fl, paramId, mask, t.npcId);
         }
         return;   // one per frame
     }
