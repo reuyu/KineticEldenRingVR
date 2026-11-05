@@ -8,6 +8,7 @@
 #include "log.h"
 #include "pose_override.h"
 
+#include <windows.h>
 #include <algorithm>
 #include <cmath>
 #include <mutex>
@@ -29,6 +30,9 @@ struct Arm {
     Vec3 theta{}, omega{};
     Vec3 shoulder{};          // last frame's shoulder, for impulses that arrive before the next one
     Vec3 angImpulse{};        // accumulated since the last frame (N*m*s)
+    Vec3 axisDir{};           // shoulder to elbow (no twist about it)
+    // the physics weapon (right arm): where your blade holds it, and when that was last reported
+    Vec3 simTip{}; float simDev = 0.f; double simAt = -10.0;
     bool seen = false;
 };
 
@@ -41,6 +45,7 @@ double g_logAt = 0;
 int g_hits = 0;
 float g_maxImpulse = 0, g_maxSwingDeg = 0;
 int g_maxSwingNpc = 0, g_maxSwingSide = 0;
+int g_held = 0;   // frames an enemy weapon was held off by your blade
 
 uint32_t PartKey(uint8_t* chr, int side, int kind) {
     const uint64_t a = (uint64_t)(uintptr_t)chr;
@@ -58,6 +63,18 @@ Quat FromRotVec(const Vec3& r) {
     const float a = r.Length();
     if (a < 1e-6f) return Quat{};
     return Quat::AxisAngle(r * (1.f / a), a);
+}
+
+double NowSecLocal() {
+    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)f.QuadPart;
+}
+
+ContactPart MakePart(uint32_t key, uint8_t* chr, int side, int kind, const Vec3& a, const Vec3& b, float r) {
+    ContactPart p{};
+    p.key = key; p.chr = chr; p.side = side; p.kind = kind; p.a = a; p.b = b; p.radius = r; p.da = a; p.db = b;
+    return p;
 }
 
 Arm* FindArm(uint8_t* chr, int side) {
@@ -103,11 +120,30 @@ void ContactImpulse(uint32_t key, const Vec3& point, const Vec3& impulse) {
     std::lock_guard<std::mutex> lock(g_mtx);
     for (const auto& p : g_parts) {
         if (p.key != key) continue;
+        if (p.kind == 2) return;   // the weapon is a physics body of its own (ContactWeaponSim)
         Arm* a = FindArm(p.chr, p.side);
         if (!a) return;
-        a->angImpulse = a->angImpulse + (point - a->shoulder).Cross(impulse);
+        Vec3 L = (point - a->shoulder).Cross(impulse);
+        // An arm does not spin about its own length when pushed: keep only the swing.
+        L = L - a->axisDir * L.Dot(a->axisDir);
+        a->angImpulse = a->angImpulse + L;
         ++g_hits;
         g_maxImpulse = std::max(g_maxImpulse, impulse.Length());
+        return;
+    }
+}
+
+void ContactWeaponSim(uint32_t key, const Vec3& grip, const Vec3& tip, float deviation) {
+    (void)grip;
+    std::lock_guard<std::mutex> lock(g_mtx);
+    for (const auto& p : g_parts) {
+        if (p.key != key || p.kind != 2) continue;
+        Arm* a = FindArm(p.chr, p.side);
+        if (!a) return;
+        const double now = NowSecLocal();
+        // Both hands' scenes may hold the same weapon: within one frame the larger deviation wins.
+        if (now - a->simAt < 0.004 && deviation < a->simDev) return;
+        a->simTip = tip; a->simDev = deviation; a->simAt = now;
         return;
     }
 }
@@ -157,8 +193,30 @@ void ContactFrame(uint8_t* player, double now) {
             a->seen = true; a->npcId = t.npcId;
             const Vec3 S = world(ua[s]);
             a->shoulder = S;
-            // Swing: the impulses of the last frame, then a damped spring back into the animation.
-            if (dt > 0.f) {
+            a->axisDir = (world(fa[s]) - S).Normalized();
+            // The weapon as the animation wants it.
+            const bool hasWeapon = s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f;
+            Vec3 W0{}, T0{}; Quat wq0{};
+            if (hasWeapon) {
+                W0 = world(wb);
+                wq0 = (rootQ * mq[wb]).Normalized();
+                T0 = W0 + wq0.Rotate(weaponAxis) * c.physicsEnemyWeaponLength;
+            }
+            const bool held = hasWeapon && now - a->simAt < 0.1;
+            if (held) {
+                // Your blade holds the weapon off its path: the arm turns about the shoulder to carry it there.
+                const Vec3 u = (T0 - S).Normalized(), v = (a->simTip - S).Normalized();
+                Quat q = Quat::FromTo(u, v).Normalized();
+                if (q.w < 0.f) q = Quat{-q.x, -q.y, -q.z, -q.w};
+                const float ang = 2.f * std::acos(std::min(q.w, 1.f));
+                Vec3 rv{};
+                if (ang > 1e-4f) { const Vec3 ax = Vec3{q.x, q.y, q.z}.Normalized(); rv = ax * std::min(ang, maxRad); }
+                a->omega = dt > 0.f ? (rv - a->theta) * (1.f / dt) : Vec3{};
+                a->omega = a->omega * 0.5f;   // released, it comes back with some of that speed
+                a->theta = rv;
+                a->angImpulse = Vec3{};
+            } else if (dt > 0.f) {
+                // Swing: the impulses of the last frame, then a damped spring back into the animation.
                 a->omega = a->omega + a->angImpulse * (1.f / inertia);
                 a->omega = a->omega + (a->theta * -k - a->omega * damp) * (dt / inertia);
                 a->theta = a->theta + a->omega * dt;
@@ -176,15 +234,16 @@ void ContactFrame(uint8_t* player, double now) {
             const Quat R = FromRotVec(a->theta);
             auto swung = [&](const Vec3& p) { return S + R.Rotate(p - S); };
             const Vec3 E = swung(world(fa[s])), H = swung(world(hd[s]));
-            g_parts.push_back({PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f, {}, 0.f});
-            g_parts.push_back({PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f, {}, 0.f});
-            if (s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f) {
-                const Vec3 W = swung(world(wb));
-                const Quat wq = (R * rootQ * mq[wb]).Normalized();
-                const Vec3 dir = wq.Rotate(weaponAxis);
-                ContactPart wp{PartKey(t.chr, s, 2), t.chr, s, 2, W, W + dir * c.physicsEnemyWeaponLength, 0.035f, {}, c.physicsEnemyWeaponLength};
+            g_parts.push_back(MakePart(PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.08f));
+            g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.065f));
+            if (hasWeapon) {
+                ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.035f);
+                wp.length = c.physicsEnemyWeaponLength;
+                wp.da = swung(W0); wp.db = held ? a->simTip : swung(T0);
+                const Quat wq = (R * wq0).Normalized();
                 wp.axis[0] = wq.Rotate(Vec3{1, 0, 0}); wp.axis[1] = wq.Rotate(Vec3{0, 1, 0}); wp.axis[2] = wq.Rotate(Vec3{0, 0, 1});
                 g_parts.push_back(wp);
+                if (held) ++g_held;
             }
             // Draw the swing: rotate the upper arm in model space about its own origin (the shoulder).
             if (a->theta.Length() > 0.0035f) {
@@ -197,16 +256,16 @@ void ContactFrame(uint8_t* player, double now) {
         // The body: torso, head, thighs and calves. These do not swing; the blade cuts, sticks or glances on them.
         if (c.physicsBodyContact) {
             const int pel = TrackerBoneIndex(t.hkb, "Pelvis"), neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
-            if (pel >= 0 && neck >= 0) g_parts.push_back({PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.16f, {}, 0.f});
+            if (pel >= 0 && neck >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.21f));
             if (head >= 0) {
                 const Vec3 hp = world(head), up = rootQ.Rotate(Vec3{0, 1, 0});
-                g_parts.push_back({PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f, {}, 0.f});
+                g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.13f));
             }
             static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
             for (int s = 0; s < 2; ++s) {
                 const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
-                if (th >= 0 && ca >= 0) g_parts.push_back({PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f, {}, 0.f});
-                if (ca >= 0 && fo >= 0) g_parts.push_back({PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f, {}, 0.f});
+                if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.10f));
+                if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.075f));
             }
         }
     }
@@ -214,9 +273,9 @@ void ContactFrame(uint8_t* player, double now) {
 
     if (now - g_logAt >= 5.0) {
         if (c.physicsContactLog && (enemies > 0 || g_hits > 0))
-            LOGI("[phys] contact: %d enemy(ies), %d capsule(s); blade contacts %d (largest impulse %.1f N*s); largest arm swing %.0f deg (npc %d %s arm)",
-                 enemies, (int)g_parts.size(), g_hits, g_maxImpulse, g_maxSwingDeg, g_maxSwingNpc, g_maxSwingSide ? "right" : "left");
-        g_logAt = now; g_hits = 0; g_maxImpulse = 0; g_maxSwingDeg = 0;
+            LOGI("[phys] contact: %d enemy(ies), %d capsule(s); blade contacts %d (largest impulse %.1f N*s); largest arm swing %.0f deg (npc %d %s arm); weapon held off by your blade %d frame(s)",
+                 enemies, (int)g_parts.size(), g_hits, g_maxImpulse, g_maxSwingDeg, g_maxSwingNpc, g_maxSwingSide ? "right" : "left", g_held);
+        g_logAt = now; g_hits = 0; g_held = 0; g_maxImpulse = 0; g_maxSwingDeg = 0;
     }
 }
 

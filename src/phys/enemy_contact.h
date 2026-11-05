@@ -23,6 +23,9 @@ struct ContactPart {
     float radius;
     ervr::Vec3 axis[3];    // kind 2: the weapon bone's local x, y, z in the world (the blade lies along one of them)
     float length;          // kind 2: EnemyWeaponLength
+    ervr::Vec3 da, db;     // where the part really is: a/b with the arm's swing applied. For the weapon, a/b is
+                           // where the ANIMATION wants it (the physics weapon is driven toward that) and da/db
+                           // follows the physics weapon your blade may be holding off.
 };
 
 // Game thread, once per simulation frame from the physics layer: rebuild the capsules from the enemies' current
@@ -34,6 +37,10 @@ int ContactParts(ContactPart* out, int max);
 
 // A contact's impulse on the enemy part (N*s, world) at a world point. Any thread.
 void ContactImpulse(uint32_t key, const ervr::Vec3& point, const ervr::Vec3& impulse);
+
+// The physics weapon of an enemy (part key) this frame, in the world, while your blade is on it: grip and tip,
+// and how far its tip is off the animation's (m). Its arm is turned to carry it there. Any thread.
+void ContactWeaponSim(uint32_t key, const ervr::Vec3& grip, const ervr::Vec3& tip, float deviation);
 
 void ContactReset();
 

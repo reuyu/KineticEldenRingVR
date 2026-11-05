@@ -97,7 +97,8 @@ void HitJudgeFrame(uint8_t* player, double now) {
     for (int i = 0; i < n; ++i) {
         if (parts[i].kind != 2) continue;
         WeaponTrack& w = g_tracks[parts[i].key];
-        const Vec3 a = parts[i].a, b = parts[i].b;
+        // Where the weapon really is (held off by your blade, its arm turned), not where the animation wants it.
+        const Vec3 a = parts[i].da, b = parts[i].db;
         float speed = 0.f;
         if (w.have && now > w.lastT) speed = (b - w.lastTip).Length() / (float)(now - w.lastT);
         w.lastTip = b; w.lastT = now; w.have = true;
