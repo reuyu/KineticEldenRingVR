@@ -853,14 +853,14 @@ struct Config {
     bool  physicsBodyContact = true;
     bool  physicsGameShapes = true;           // the enemy body is the game's own ragdoll capsules (hand-made ones if unreadable)
     float physicsBodyScale = 1.0f;            // thickness of the enemy body capsules (1 = an armoured soldier)
-    float physicsBodyCutEnergy = 500.f;       // J
-    float physicsBodyStickEnergy = 120.f;     // J
+    float physicsBodyCutEnergy = 110.f;       // J (with the mass the blade hits with at the point)
+    float physicsBodyStickEnergy = 20.f;      // J
     float physicsBodyPierceEnergy = 80.f;     // J
     // Strike gate: the game's own attack collision (ERVR's strikes) only counts where the simulated blade really
     // struck: a body part cut, stuck or pierced, or an arm hit with ArmHitEnergy or more. A blade on an enemy
     // weapon or arm (a parry, a push), a glance, or a blade at an enemy that has not struck yet deals no damage.
     bool  physicsGateStrikes = true;
-    float physicsArmHitEnergy = 500.f;        // J
+    float physicsArmHitEnergy = 110.f;        // J
     float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
     // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always
     // holds and costs stamina instead. Damage the game deals with no enemy weapon near you is left alone.

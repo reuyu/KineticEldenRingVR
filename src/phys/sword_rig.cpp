@@ -532,24 +532,25 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
         const PxVec3 vPart = (r.slotTo[k].p - r.slotFrom[k].p) * (1.f / std::fmax(p.dt, 1e-3f));
         PxVec3 v = vBlade - vPart;   // relative to the moving part
         const float speed = v.magnitude();
-        const float E = 0.5f * r.body->getMass() * speed * speed * p.strFactor;
-        // Evidence for "gentle blows cut through": every impact's numbers (at most 30 per 5 s per hand).
+        // The mass the part really meets at that point: a blade turning about its grip hits with less than its
+        // whole mass, 1 / (1/m + (r x n) I^-1 (r x n)) with n along the relative velocity (0.5-0.7 kg at the tip
+        // of a 3.7 kg sword, near the whole mass in a thrust along the blade).
+        float mEff = r.body->getMass();
+        if (speed > 1e-3f) {
+            const PxVec3 n = v * (1.f / speed), rn = (im.point - com).cross(n);
+            const PxQuat qm = pose.q * r.body->getCMassLocalPose().q;
+            const PxVec3 l = qm.rotateInv(rn), inv = r.body->getMassSpaceInvInertiaTensor();
+            const float x = l.x * l.x * inv.x + l.y * l.y * inv.y + l.z * l.z * inv.z;
+            mEff = 1.f / (1.f / std::fmax(r.body->getMass(), 1e-3f) + x);
+        }
+        const float E = 0.5f * mEff * speed * speed * p.strFactor;
+        // Every impact's numbers (at most 30 per 5 s per hand).
         if (c.physicsContactLog && r.impactLogN < 30) {
             ++r.impactLogN;
             const PxVec3 s0 = pose.q.rotate(p.shaft);
-            // The mass the part really meets at that point: a blade turning about its grip hits with less than its
-            // whole mass (1 / (1/m + (r x n) I^-1 (r x n)), n along the relative velocity).
-            float mEff = r.body->getMass();
-            if (speed > 1e-3f) {
-                const PxVec3 n = v * (1.f / speed), rn = (im.point - com).cross(n);
-                const PxQuat qm = pose.q * r.body->getCMassLocalPose().q;
-                const PxVec3 l = qm.rotateInv(rn), inv = r.body->getMassSpaceInvInertiaTensor();
-                const float x = l.x * l.x * inv.x + l.y * l.y * inv.y + l.z * l.z * inv.z;
-                mEff = 1.f / (1.f / std::fmax(r.body->getMass(), 1e-3f) + x);
-            }
-            LOGI("[phys] impact %s: kind %d, blade %.1f m/s (lin %.1f, ang %.1f rad/s), part %.1f m/s in your tracking space (%.1f m/s in the world), relative %.1f m/s -> %.0f J with the whole %.1f kg (x%.2f STR); effective mass at that point %.2f kg -> %.0f J; %.2f m from grip, dt %.4f s, blade lag %.1f cm",
-                 r.hand ? "R" : "L", r.slotKind[k], vBlade.magnitude(), preLin.magnitude(), preAng.magnitude(), vPart.magnitude(), r.slotWorldSpeed[k], speed, E,
-                 r.body->getMass(), p.strFactor, mEff, 0.5f * mEff * speed * speed * p.strFactor, (im.point - pose.p).dot(s0), p.dt,
+            LOGI("[phys] impact %s: kind %d, blade %.1f m/s (lin %.1f, ang %.1f rad/s), part %.1f m/s in your tracking space (%.1f m/s in the world), relative %.1f m/s, effective mass at that point %.2f of %.1f kg (x%.2f STR) -> %.0f J; %.2f m from grip, dt %.4f s, blade lag %.1f cm",
+                 r.hand ? "R" : "L", r.slotKind[k], vBlade.magnitude(), preLin.magnitude(), preAng.magnitude(), vPart.magnitude(), r.slotWorldSpeed[k], speed, mEff,
+                 r.body->getMass(), p.strFactor, E, (im.point - pose.p).dot(s0), p.dt,
                  100.f * (pose.p - p.target.p).magnitude());
         }
         r.energyMax = std::fmax(r.energyMax, E);
