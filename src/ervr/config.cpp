@@ -508,6 +508,7 @@ void Config::Load(const std::wstring& path) {
     physicsContactLog = GetB(ini, L"Physics", L"ContactLog", physicsContactLog);
     physicsBodyContact = GetB(ini, L"Physics", L"BodyContact", physicsBodyContact);
     physicsBodyScale = GetF(ini, L"Physics", L"BodyScale", physicsBodyScale);
+    physicsGameShapes = GetB(ini, L"Physics", L"GameBodyShapes", physicsGameShapes);
     physicsBodyCutEnergy = GetF(ini, L"Physics", L"BodyCutEnergy", physicsBodyCutEnergy);
     physicsBodyStickEnergy = GetF(ini, L"Physics", L"BodyStickEnergy", physicsBodyStickEnergy);
     physicsBodyPierceEnergy = GetF(ini, L"Physics", L"BodyPierceEnergy", physicsBodyPierceEnergy);

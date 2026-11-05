@@ -4,6 +4,7 @@
 #include "config.h"
 #include "game_er.h"
 #include "game_memory.h"
+#include "game_shapes.h"
 #include "hit_judge.h"
 #include "log.h"
 #include "pose_override.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,7 +46,19 @@ struct Torso {
     bool seen = false;
 };
 
+// The game's own body capsules of an enemy (game_shapes), read once and kept while it stays near.
+struct Shapes {
+    uint8_t* chr = nullptr;
+    uintptr_t src = 0;            // its ragdoll data: a change means the character was reloaded
+    bool ok = false, checked = false, seen = false;
+    std::string why;
+    std::vector<GameCapsule> caps;
+    std::vector<int> kind, side;  // ContactPart kind/side per capsule, from the bone it follows
+};
+
 std::mutex g_mtx;
+std::vector<Shapes> g_shapes;
+std::set<int> g_shapesLogged;
 std::vector<Arm> g_arms;
 std::vector<Torso> g_torsos;
 double g_bodyLogAt = 0;
@@ -61,6 +75,20 @@ float g_maxSwayDeg = 0;
 uint32_t PartKey(uint8_t* chr, int side, int kind) {
     const uint64_t a = (uint64_t)(uintptr_t)chr;
     return (uint32_t)(((a >> 4) ^ (a >> 32)) * 16u) + (uint32_t)(side * 8 + kind);
+}
+
+// A game body capsule's key: clear of PartKey's (side * 8 + kind < 16) for the same enemy.
+uint32_t ShapeKey(uint8_t* chr, int i) {
+    const uint64_t a = (uint64_t)(uintptr_t)chr;
+    return (uint32_t)(((a >> 4) ^ (a >> 32)) * 16u) + 0x40000000u + (uint32_t)i * 0x10000u;
+}
+
+bool Under(const std::vector<int16_t>& par, int b, int anc) {
+    for (int i = 0; b >= 0 && b < (int)par.size() && i < 256; ++i) {
+        if (b == anc) return true;
+        b = par[b];
+    }
+    return false;
 }
 
 Vec3 AxisFrom(const std::string& s) {
@@ -122,7 +150,7 @@ bool ModelPose(uint8_t* chr, uint8_t* hkb, int n, const std::vector<int16_t>& pa
 
 void ContactReset() {
     std::lock_guard<std::mutex> lock(g_mtx);
-    g_arms.clear(); g_torsos.clear(); g_parts.clear(); g_last = 0;
+    g_arms.clear(); g_torsos.clear(); g_parts.clear(); g_shapes.clear(); g_last = 0;
 }
 
 int ContactParts(ContactPart* out, int max) {
@@ -175,7 +203,7 @@ void ContactFrame(uint8_t* player, double now) {
     const auto& c = ervr::Cfg();
     std::lock_guard<std::mutex> lock(g_mtx);
     g_parts.clear();
-    if (!c.physicsContact || !player) { g_arms.clear(); g_torsos.clear(); return; }
+    if (!c.physicsContact || !player) { g_arms.clear(); g_torsos.clear(); g_shapes.clear(); return; }
     const float dt = g_last > 0 ? (float)std::min(std::max(now - g_last, 0.0), 0.05) : 0.f;
     g_last = now;
 
@@ -193,6 +221,7 @@ void ContactFrame(uint8_t* player, double now) {
 
     for (auto& a : g_arms) a.seen = false;
     for (auto& t : g_torsos) t.seen = false;
+    for (auto& sh : g_shapes) sh.seen = false;
     const float tI = std::max(c.physicsTorsoInertia, 0.1f), tK = std::max(c.physicsTorsoStiffness, 0.f);
     const float tD = 2.f * std::max(c.physicsTorsoDamping, 0.f) * std::sqrt(tK * tI);
     const float tMax = std::min(std::max(c.physicsTorsoMaxDeg, 0.f), 60.f) * 0.0174533f;
@@ -247,6 +276,35 @@ void ContactFrame(uint8_t* player, double now) {
         }
         // Upper-body bones in the world with the sway applied.
         auto worldU = [&](int b) { return P + TR.Rotate(world(b) - P); };
+        // The game's own body capsules for this enemy (read once; re-read if the character was reloaded).
+        Shapes* shp = nullptr;
+        if (c.physicsBodyContact && c.physicsGameShapes) {
+            for (auto& sh : g_shapes) if (sh.chr == t.chr) { shp = &sh; break; }
+            const uintptr_t src = GameShapesSource(t.chr);
+            if (!shp) { g_shapes.push_back(Shapes{}); shp = &g_shapes.back(); shp->chr = t.chr; shp->src = ~(uintptr_t)0; }
+            shp->seen = true;
+            if (src != shp->src) {
+                shp->src = src; shp->checked = false;
+                shp->ok = src && GameShapesRead(t.chr, t.hkb, shp->caps, shp->why);
+                shp->kind.assign(shp->caps.size(), 3); shp->side.assign(shp->caps.size(), 0);
+                if (shp->ok) {
+                    const int neckB = TrackerBoneIndex(t.hkb, "Neck"), headB = TrackerBoneIndex(t.hkb, "Head");
+                    static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"};
+                    for (size_t i = 0; i < shp->caps.size(); ++i) {
+                        const int b = shp->caps[i].animBone;
+                        int kd = 3, sd = 0;
+                        for (int s = 0; s < 2; ++s) {
+                            if (ua[s] >= 0 && Under(*par, b, ua[s])) { kd = fa[s] >= 0 && Under(*par, b, fa[s]) ? 1 : 0; sd = s; }
+                            const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]);
+                            if (th >= 0 && Under(*par, b, th)) { kd = ca >= 0 && Under(*par, b, ca) ? 6 : 5; sd = s; }
+                        }
+                        if (kd == 3 && ((headB >= 0 && Under(*par, b, headB)) || (neckB >= 0 && b == neckB && headB < 0))) kd = 4;
+                        shp->kind[i] = kd; shp->side[i] = sd;
+                    }
+                }
+            }
+        }
+        Vec3 armS[2]{}; Quat armR[2]{}; bool armOn[2]{};
         for (int s = 0; s < 2; ++s) {
             if (ua[s] < 0 || fa[s] < 0 || hd[s] < 0) continue;
             Arm* a = FindArm(t.chr, s);
@@ -295,8 +353,11 @@ void ContactFrame(uint8_t* player, double now) {
             const Quat R = FromRotVec(a->theta);
             auto swung = [&](const Vec3& p) { return S + R.Rotate(p - S); };
             const Vec3 E = swung(worldU(fa[s])), H = swung(worldU(hd[s]));
-            g_parts.push_back(MakePart(PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f));
-            g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f));
+            armS[s] = S; armR[s] = R; armOn[s] = true;
+            if (!(shp && shp->ok)) {
+                g_parts.push_back(MakePart(PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f));
+                g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f));
+            }
             if (hasWeapon) {
                 ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.05f);
                 wp.length = c.physicsEnemyWeaponLength;
@@ -319,7 +380,59 @@ void ContactFrame(uint8_t* player, double now) {
         if (c.physicsBodyContact) {
             const int neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
             const float bs = std::min(std::max(c.physicsBodyScale, 0.3f), 3.f);
-            if (pel >= 0 && neck >= 0) {
+            if (shp && shp->ok) {
+                // The game's own capsules, each on the bone it follows, with the upper-body sway and the arms'
+                // swing applied like the animation bones they ride on.
+                const Quat bodyQ = (TR * rootQ).Normalized();
+                std::vector<ContactPart> gp;
+                float worst = 0.f; int worstI = -1;
+                for (size_t i = 0; i < shp->caps.size(); ++i) {
+                    const GameCapsule& gc = shp->caps[i];
+                    const int b = gc.animBone;
+                    if (b < 0 || b >= (int)mq.size()) continue;
+                    const Vec3 bp = world(b);
+                    const Quat bq = (rootQ * mq[b]).Normalized();
+                    const Vec3 cp = bp + bq.Rotate(gc.t);
+                    const Quat cq = (bq * gc.q).Normalized();
+                    Vec3 A = cp + cq.Rotate(gc.a), B = cp + cq.Rotate(gc.b);
+                    const float off = ((A + B) * 0.5f - bp).Length();
+                    if (off > worst) { worst = off; worstI = (int)i; }
+                    if (spine >= 0 && Under(*par, b, spine)) { A = P + TR.Rotate(A - P); B = P + TR.Rotate(B - P); }
+                    const int kd = shp->kind[i], sd = shp->side[i];
+                    if ((kd == 0 || kd == 1) && armOn[sd]) {
+                        A = armS[sd] + armR[sd].Rotate(A - armS[sd]); B = armS[sd] + armR[sd].Rotate(B - armS[sd]);
+                    }
+                    if ((B - A).Length() < 0.002f) B = A + bodyQ.Rotate(Vec3{0, 0.002f, 0});   // a sphere: keep an axis
+                    gp.push_back(MakePart(ShapeKey(t.chr, (int)i), t.chr, sd, kd, A, B, gc.radius * bs));
+                }
+                if (!shp->checked) {
+                    // Once: every capsule must sit on (or near) its bone, or the layout was misread - fall back.
+                    shp->checked = true;
+                    if (worst > 0.8f) {
+                        shp->ok = false;
+                        shp->why = "capsule " + (worstI >= 0 ? shp->caps[worstI].ragName : std::string("?")) + " is " + std::to_string(worst) + " m off its bone";
+                        gp.clear();
+                    }
+                    if (c.physicsContactLog && !g_shapesLogged.count(t.npcId)) {
+                        g_shapesLogged.insert(t.npcId);
+                        if (!shp->ok) LOGI("[phys] game body npc %d: not used (%s), hand-made capsules instead", t.npcId, shp->why.c_str());
+                        else {
+                            std::string list;
+                            static const char* kn[8] = {"arm", "forearm", "weapon", "trunk", "head", "thigh", "calf", "bar"};
+                            for (size_t i = 0; i < shp->caps.size(); ++i) {
+                                const GameCapsule& gc = shp->caps[i];
+                                char b[160];
+                                snprintf(b, sizeof(b), "%s%s>%s %s r%.2f L%.2f off%.2f", i ? ", " : "", gc.ragName.c_str(), gc.animName.c_str(),
+                                         kn[shp->kind[i] & 7], gc.radius, (gc.b - gc.a).Length(), gc.t.Length());
+                                list += b;
+                            }
+                            LOGI("[phys] game body npc %d: %s (largest offset from its bone %.2f m) | %s", t.npcId, shp->why.c_str(), worst, list.c_str());
+                        }
+                    }
+                }
+                for (auto& q : gp) g_parts.push_back(q);
+            }
+            if (!(shp && shp->ok) && pel >= 0 && neck >= 0) {
                 // The trunk as it is drawn (armour included), not a stick down the spine: two upright capsules side
                 // by side from the hips to the shoulders (wide and not deep, like a chest), a bar across the
                 // shoulders and one across the hips.
@@ -336,12 +449,12 @@ void ContactFrame(uint8_t* player, double now) {
                 const int lt = TrackerBoneIndex(t.hkb, "L_Thigh"), rt = TrackerBoneIndex(t.hkb, "R_Thigh");
                 if (lt >= 0 && rt >= 0) g_parts.push_back(MakePart(PartKey(t.chr, 1, 7), t.chr, 1, 7, world(lt), world(rt), 0.14f * bs));
             }
-            if (head >= 0) {
+            if (!(shp && shp->ok) && head >= 0) {
                 const Vec3 hp = worldU(head), up = (TR * rootQ).Rotate(Vec3{0, 1, 0});
                 g_parts.push_back(MakePart(PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.10f, 0.13f * bs));
             }
             static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
-            for (int s = 0; s < 2; ++s) {
+            for (int s = 0; s < 2 && !(shp && shp->ok); ++s) {
                 const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
                 if (th >= 0 && ca >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.10f * bs));
                 if (ca >= 0 && fo >= 0) g_parts.push_back(MakePart(PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.08f * bs));
@@ -367,6 +480,7 @@ void ContactFrame(uint8_t* player, double now) {
     }
     g_torsos.erase(std::remove_if(g_torsos.begin(), g_torsos.end(), [](const Torso& t) { return !t.seen; }), g_torsos.end());
     g_arms.erase(std::remove_if(g_arms.begin(), g_arms.end(), [](const Arm& a) { return !a.seen; }), g_arms.end());
+    g_shapes.erase(std::remove_if(g_shapes.begin(), g_shapes.end(), [](const Shapes& s) { return !s.seen; }), g_shapes.end());
 
     if (now - g_logAt >= 5.0) {
         if (c.physicsContactLog && (enemies > 0 || g_hits > 0))

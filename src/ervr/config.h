@@ -839,11 +839,12 @@ struct Config {
     float physicsTorsoDamping = 1.0f;
     float physicsTorsoMaxDeg = 20.f;
     bool  physicsContactLog = true;
-    bool  physicsHurtboxProbe = true;          // log the game's own body shapes of nearby enemies ("[hurt]")
+    bool  physicsHurtboxProbe = false;          // log the game's own body shapes of nearby enemies ("[hurt]")
     // The body (torso, head, thighs, calves): a blow's energy at contact (0.5 m v^2 of the blade, x STR/16 scaling)
     // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
     // first): >= BodyPierceEnergy goes in and can be pushed deeper against BodyFriction, and pulled back out.
     bool  physicsBodyContact = true;
+    bool  physicsGameShapes = true;           // the enemy body is the game's own ragdoll capsules (hand-made ones if unreadable)
     float physicsBodyScale = 1.0f;            // thickness of the enemy body capsules (1 = an armoured soldier)
     float physicsBodyCutEnergy = 500.f;       // J
     float physicsBodyStickEnergy = 120.f;     // J

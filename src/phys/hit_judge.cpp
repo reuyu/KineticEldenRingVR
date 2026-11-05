@@ -92,8 +92,8 @@ void HitJudgeFrame(uint8_t* player, double now) {
     const float shieldR = std::max(c.physicsShieldRadius, 0.05f);
 
     // Measure every enemy weapon this frame.
-    ContactPart parts[64];
-    const int n = ContactParts(parts, 64);
+    ContactPart parts[128];
+    const int n = ContactParts(parts, 128);
     for (int i = 0; i < n; ++i) {
         if (parts[i].kind != 2) continue;
         WeaponTrack& w = g_tracks[parts[i].key];

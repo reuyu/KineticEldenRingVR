@@ -48,7 +48,7 @@ bool g_failed = false;          // engine creation failed or a step faulted: sta
 std::atomic<int> g_resetMask{3};
 
 // M2.5: enemy capsules (enemy_contact), converted into this hand's tracking frame.
-constexpr int kMaxParts = 48;
+constexpr int kMaxParts = 96;
 struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; };
 
 // A blade meeting a body part for the first time (TOUCH_FOUND), to be classified after the sub-step.

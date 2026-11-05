@@ -167,6 +167,7 @@ add_library(ERVR SHARED
   src/phys/enemy_contact.cpp
   src/phys/hit_judge.cpp
   src/phys/hurtbox_probe.cpp
+  src/phys/game_shapes.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr src/phys ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
