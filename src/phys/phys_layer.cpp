@@ -128,6 +128,7 @@ void PhysGameFrame(uint8_t* player, int pass) {
         PoseOverrideEnd();
         HitJudgeFrame(player, now);
         HurtboxProbeFrame(player);
+        DummyProbeFrame();
     }
     PoseOverrideWrite(0, nullptr);
     PoseOverrideLog();

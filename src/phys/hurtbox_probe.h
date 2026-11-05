@@ -10,4 +10,8 @@ namespace kinetic {
 void HurtboxProbeFrame(uint8_t* player);
 void HurtboxProbeReset();
 
+// Finds the enemy's model file (FLVER) in memory from its ChrIns and logs the dummy points on its weapon bones
+// (the points the game strings its attack spheres along the blade with), under "[dmy]". [Physics] DummyProbe.
+void DummyProbeFrame();
+
 }  // namespace kinetic

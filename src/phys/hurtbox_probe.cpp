@@ -151,3 +151,122 @@ void HurtboxProbeFrame(uint8_t* player) {
 void HurtboxProbeReset() {}
 
 }  // namespace kinetic
+
+// ---------------------------------------------------------------------------------------------------------------
+// Weapon dummy points. FLVER2 layout (SoulsFormats): header 0x80 (0x14 dummy count, 0x18 material count,
+// 0x1C bone count); dummies 0x40 each from 0x80 (pos 3f, colour, forward 3f, int16 refId, int16 parentBone,
+// upward 3f, int16 attachBone, ...); materials 0x20 each; bones 0x80 each (translation 3f, int nameOffset,
+// rotation 3f (euler), int16 parent, int16 child, scale 3f, ...); names UTF-16 at file offsets.
+
+namespace kinetic {
+
+namespace {
+
+std::set<int> g_dmyDone;
+
+std::string WName(uintptr_t at) {
+    wchar_t w[48] = {};
+    const size_t room = 0x1000 - (at & 0xFFF);
+    if (!ervr::ProbeRead((void*)at, w, std::min(room, sizeof(w) - 2))) return {};
+    std::string s;
+    for (int i = 0; i < 47 && w[i]; ++i) s += (char)(w[i] < 128 ? w[i] : '?');
+    return s;
+}
+
+bool IsFlver(uintptr_t p) {
+    char m[8] = {};
+    return PtrLike(p) && ervr::ProbeRead((void*)p, m, 8) && std::memcmp(m, "FLVER\0L\0", 8) == 0;
+}
+
+void DumpFlver(uintptr_t f, const std::string& path, int npc) {
+    int32_t h[8] = {};
+    ervr::ProbeRead((void*)(f + 0x08), h, sizeof(h));
+    const int ver = h[0], nd = h[3], nm = h[4], nb = h[5];
+    LOGI("[dmy] npc %d: FLVER at %s (%p) version 0x%x, %d dummies, %d materials, %d bones", npc, path.c_str(), (void*)f, ver, nd, nm, nb);
+    if (nd < 0 || nd > 2000 || nb < 0 || nb > 2000 || nm < 0 || nm > 2000) return;
+    const uintptr_t bones = f + 0x80 + (uintptr_t)nd * 0x40 + (uintptr_t)nm * 0x20;
+    std::vector<std::string> bname(nb);
+    struct Bone { float t[3]; int name; float r[3]; int16_t parent, child; float s[3]; };
+    std::vector<Bone> bs(nb);
+    for (int i = 0; i < nb; ++i) {
+        uint8_t raw[0x80];
+        if (!ervr::ProbeRead((void*)(bones + (uintptr_t)i * 0x80), raw, sizeof(raw))) return;
+        std::memcpy(&bs[i], raw, sizeof(Bone));
+        bname[i] = WName(f + (uint32_t)bs[i].name);
+    }
+    auto isWeapon = [&](int b) { return b >= 0 && b < nb && bname[b].find("Weapon") != std::string::npos; };
+    int shown = 0;
+    for (int i = 0; i < nd && shown < 60; ++i) {
+        float d[16];
+        if (!ervr::ProbeRead((void*)(f + 0x80 + (uintptr_t)i * 0x40), d, sizeof(d))) return;
+        int16_t ref, parent, attach;
+        std::memcpy(&ref, (char*)d + 0x1C, 2); std::memcpy(&parent, (char*)d + 0x1E, 2); std::memcpy(&attach, (char*)d + 0x2C, 2);
+        if (!isWeapon(attach) && !isWeapon(parent)) continue;
+        ++shown;
+        LOGI("[dmy]   dummy %d ref %d parent %d:%s attach %d:%s pos (%.3f %.3f %.3f) fwd (%.2f %.2f %.2f) up (%.2f %.2f %.2f)", i, ref, parent,
+             parent >= 0 && parent < nb ? bname[parent].c_str() : "-", attach, attach >= 0 && attach < nb ? bname[attach].c_str() : "-",
+             d[0], d[1], d[2], d[4], d[5], d[6], d[8], d[9], d[10]);
+    }
+    LOGI("[dmy]   %d weapon dummies", shown);
+    // the weapon bones and their chain to the root (bind pose, local)
+    std::set<int> chain;
+    for (int i = 0; i < nb; ++i)
+        if (isWeapon(i)) for (int b = i, k = 0; b >= 0 && b < nb && k < 64; b = bs[b].parent, ++k) chain.insert(b);
+    for (int b : chain)
+        LOGI("[dmy]   bone %d %s parent %d t (%.3f %.3f %.3f) r (%.3f %.3f %.3f) s (%.2f %.2f %.2f)", b, bname[b].c_str(), bs[b].parent,
+             bs[b].t[0], bs[b].t[1], bs[b].t[2], bs[b].r[0], bs[b].r[1], bs[b].r[2], bs[b].s[0], bs[b].s[1], bs[b].s[2]);
+}
+
+// Breadth-first over the pointers in each object's first 0x400 bytes, depth <= 4, for a FLVER file in memory.
+bool FindFlver(const std::vector<std::pair<uintptr_t, std::string>>& roots, int npc) {
+    std::deque<Node> q;
+    std::set<uintptr_t> seen;
+    for (auto& r : roots) if (PtrLike(r.first)) { q.push_back({r.first, 0, r.second}); seen.insert(r.first); }
+    int visited = 0;
+    while (!q.empty() && visited < 600) {
+        Node n = q.front(); q.pop_front(); ++visited;
+        if (IsFlver(n.addr)) { DumpFlver(n.addr, n.path, npc); return true; }
+        if (n.depth >= 4) continue;
+        uintptr_t blob[0x80];
+        if (!ervr::ProbeRead((void*)n.addr, blob, sizeof(blob))) { if (!ervr::ProbeRead((void*)n.addr, blob, 0x100)) continue; std::memset(blob + 0x20, 0, 0x300); }
+        for (int i = 0; i < 0x80; ++i) {
+            const uintptr_t v = blob[i];
+            if (!PtrLike(v) || InModule(v) || seen.count(v)) continue;
+            seen.insert(v);
+            char p[256]; snprintf(p, sizeof(p), "%s+0x%x", n.path.c_str(), i * 8);
+            if (IsFlver(v)) { DumpFlver(v, p, npc); return true; }
+            const std::string nm = NameAt(v);
+            if (!nm.empty() || n.depth < 2) q.push_back({v, n.depth + 1, nm.empty() ? std::string(p) : std::string(p) + "(" + nm + ")"});
+        }
+    }
+    LOGI("[dmy] npc %d: no FLVER within %d objects", npc, visited);
+    return false;
+}
+
+}  // namespace
+
+void DummyProbeFrame() {
+    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 3) return;
+    for (const TrackedChr& t : TrackerList()) {
+        if (!t.chr || t.distance > 6.f || g_dmyDone.count(t.npcId) || t.boneCount < 20) continue;
+        g_dmyDone.insert(t.npcId);
+        uintptr_t mi = 0, res = 0, item = 0;
+        ervr::ProbeRead(t.chr + 0x50, &mi, 8);
+        ervr::ProbeRead(t.chr + 0x28, &res, 8);
+        if (PtrLike(mi)) ervr::ProbeRead((void*)(mi + 0x10), &item, 8);
+        LOGI("[dmy] npc %d: model ins %p (%s), model item %p (%s), chr res %p (%s)", t.npcId, (void*)mi, NameAt(mi).c_str(), (void*)item,
+             NameAt(item).c_str(), (void*)res, NameAt(res).c_str());
+        std::vector<std::pair<uintptr_t, std::string>> roots = {{item, "item"}, {res, "res"}, {mi, "modelins"}};
+        if (PtrLike(item)) {
+            uintptr_t fl = 0, dm = 0;
+            ervr::ProbeRead((void*)(item + 0x68), &fl, 8);
+            ervr::ProbeRead((void*)(item + 0x650), &dm, 8);
+            LOGI("[dmy] npc %d: item+0x68 %p (%s), item+0x650 %p (%s)", t.npcId, (void*)fl, NameAt(fl).c_str(), (void*)dm, NameAt(dm).c_str());
+            roots.insert(roots.begin(), {fl, "item+0x68"});
+        }
+        FindFlver(roots, t.npcId);
+        return;   // one per frame
+    }
+}
+
+}  // namespace kinetic
