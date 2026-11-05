@@ -830,6 +830,14 @@ struct Config {
     std::string physicsEnemyWeaponAxis = "x";  // its local axis along the blade (x|y|z, - to flip); unverified
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     bool  physicsContactLog = true;
+    // The body (torso, head, thighs, calves): a blow's energy at contact (0.5 m v^2 of the blade, x STR/16 scaling)
+    // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
+    // first): >= BodyPierceEnergy goes in and can be pushed deeper against BodyFriction, and pulled back out.
+    bool  physicsBodyContact = true;
+    float physicsBodyCutEnergy = 80.f;        // J
+    float physicsBodyStickEnergy = 25.f;      // J
+    float physicsBodyPierceEnergy = 15.f;     // J
+    float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
     // Swing stamina: swinging itself costs stamina (not only a landed hit), and a tired arm is weak - the
     // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
     bool  physicsSwingStamina = true;

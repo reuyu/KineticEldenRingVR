@@ -497,6 +497,11 @@ void Config::Load(const std::wstring& path) {
     physicsEnemyWeaponAxis = GetS(ini, L"Physics", L"EnemyWeaponAxis", physicsEnemyWeaponAxis);
     physicsEnemyWeaponLength = GetF(ini, L"Physics", L"EnemyWeaponLength", physicsEnemyWeaponLength);
     physicsContactLog = GetB(ini, L"Physics", L"ContactLog", physicsContactLog);
+    physicsBodyContact = GetB(ini, L"Physics", L"BodyContact", physicsBodyContact);
+    physicsBodyCutEnergy = GetF(ini, L"Physics", L"BodyCutEnergy", physicsBodyCutEnergy);
+    physicsBodyStickEnergy = GetF(ini, L"Physics", L"BodyStickEnergy", physicsBodyStickEnergy);
+    physicsBodyPierceEnergy = GetF(ini, L"Physics", L"BodyPierceEnergy", physicsBodyPierceEnergy);
+    physicsBodyFriction = GetF(ini, L"Physics", L"BodyFriction", physicsBodyFriction);
     physicsSwingStamina = GetB(ini, L"Physics", L"SwingStamina", physicsSwingStamina);
     physicsSwingStaminaSpeed = GetF(ini, L"Physics", L"SwingStaminaSpeed", physicsSwingStaminaSpeed);
     physicsSwingStaminaPerSec = GetF(ini, L"Physics", L"SwingStaminaPerSec", physicsSwingStaminaPerSec);

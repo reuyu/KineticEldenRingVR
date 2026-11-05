@@ -43,7 +43,7 @@ int g_maxSwingNpc = 0, g_maxSwingSide = 0;
 
 uint32_t PartKey(uint8_t* chr, int side, int kind) {
     const uint64_t a = (uint64_t)(uintptr_t)chr;
-    return (uint32_t)(((a >> 4) ^ (a >> 32)) * 8u) + (uint32_t)(side * 4 + kind);
+    return (uint32_t)(((a >> 4) ^ (a >> 32)) * 16u) + (uint32_t)(side * 8 + kind);
 }
 
 Vec3 AxisFrom(const std::string& s) {
@@ -182,6 +182,21 @@ void ContactFrame(uint8_t* player, double now) {
                 const Quat Mp = p >= 0 ? mq[p] : Quat{};
                 const Quat Rm = (rootQ.Conj() * R * rootQ).Normalized();
                 PoseOverrideAdd(t.chr, t.hkb, ua[s], (Mp.Conj() * Rm * Mp).Normalized(), Quat{});
+            }
+        }
+        // The body: torso, head, thighs and calves. These do not swing; the blade cuts, sticks or glances on them.
+        if (c.physicsBodyContact) {
+            const int pel = TrackerBoneIndex(t.hkb, "Pelvis"), neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
+            if (pel >= 0 && neck >= 0) g_parts.push_back({PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.16f});
+            if (head >= 0) {
+                const Vec3 hp = world(head), up = rootQ.Rotate(Vec3{0, 1, 0});
+                g_parts.push_back({PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f});
+            }
+            static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
+            for (int s = 0; s < 2; ++s) {
+                const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
+                if (th >= 0 && ca >= 0) g_parts.push_back({PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f});
+                if (ca >= 0 && fo >= 0) g_parts.push_back({PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f});
             }
         }
     }

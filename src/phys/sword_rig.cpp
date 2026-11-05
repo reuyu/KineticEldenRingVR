@@ -46,8 +46,12 @@ bool g_failed = false;          // engine creation failed or a step faulted: sta
 std::atomic<int> g_resetMask{3};
 
 // M2.5: enemy capsules (enemy_contact), converted into this hand's tracking frame.
-constexpr int kMaxParts = 24;
-struct PlayPart { uint32_t key; PxTransform pose; float halfHeight, radius; };
+constexpr int kMaxParts = 48;
+struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; };
+
+// A blade meeting a body part for the first time (TOUCH_FOUND), to be classified after the sub-step.
+struct Impact { int slot; PxVec3 point; };
+constexpr int kMaxImpacts = 8;
 
 // Contact impulses collected inside simulate(): per pool slot, the impulse on the enemy part and its moment.
 struct ContactAcc { PxVec3 impulse{0.f}; PxVec3 moment{0.f}; float weight = 0.f; };
@@ -69,6 +73,7 @@ class ContactSink : public PxSimulationEventCallback {
 public:
     ContactAcc* acc = nullptr;   // the rig being stepped
     int* hits = nullptr;
+    Impact* impacts = nullptr; int* nImpacts = nullptr;
     void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 nb) override {
         if (!acc) return;
         for (PxU32 i = 0; i < nb; ++i) {
@@ -90,6 +95,8 @@ public:
                 acc[slot].weight += m;
             }
             if (hits) ++*hits;
+            if ((cp.events & PxPairFlag::eNOTIFY_TOUCH_FOUND) && impacts && *nImpacts < kMaxImpacts && n > 0)
+                impacts[(*nImpacts)++] = Impact{slot, pts[0].position};
         }
     }
     void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
@@ -110,6 +117,7 @@ struct Params {
     float snap;
     float maxAngle;             // rad
     float load;                 // weapon weight torque / wrist torque
+    float strFactor;            // STR scaling of a blow's energy (1 at STR 16)
     PlayPart parts[kMaxParts];  // enemy capsules this frame (tracking frame)
     int nParts;
 };
@@ -138,6 +146,13 @@ struct Rig {
     ContactAcc acc[kMaxParts];
     int contacts = 0;                            // contact pairs reported (for the log)
     PxVec3 lastTip{0.f}; bool haveTip = false;   // swing stamina
+    // Body contact: what kind each slot holds, slots the blade passes through (until simTime), the embedded blade.
+    int slotKind[kMaxParts]{};
+    double ghostUntil[kMaxParts]{};
+    double simTime = 0;
+    Impact impacts[kMaxImpacts]; int nImpacts = 0;
+    PxD6Joint* embed = nullptr; int embedSlot = -1; uint32_t embedKey = 0; double embedSince = 0;
+    int cuts = 0, sticks = 0, pierces = 0, glances = 0; float energyMax = 0;
 };
 Rig g_rig[2];
 
@@ -266,7 +281,9 @@ void UpdateDrives(Rig& r, const Params& p) {
     r.joint->setDrive(PxD6Drive::eSLERP, PxD6JointDrive(p.kAng, p.dAng, p.torque, false));
 }
 
+void ReleaseEmbed(Rig& r, float ghostSeconds);
 void Place(Rig& r, const PxTransform& t) {
+    ReleaseEmbed(r, 0.3f);
     r.anchor->setGlobalPose(t);
     r.body->setGlobalPose(t);
     r.body->setLinearVelocity(PxVec3(0.f));
@@ -336,13 +353,97 @@ void SyncEnemies(Rig& r, const Params& p) {
         } else {
             r.slotFrom[k] = r.slotTo[k];
         }
-        r.slotTo[k] = pp.pose; r.slotKey[k] = pp.key; r.slotActive[k] = true;
+        if (r.slotKey[k] != pp.key) r.ghostUntil[k] = 0;
+        r.slotTo[k] = pp.pose; r.slotKey[k] = pp.key; r.slotKind[k] = pp.kind; r.slotActive[k] = true;
     }
     for (int k = 0; k < kMaxParts; ++k) {
         if (used[k] || !r.slotActive[k]) continue;
         r.slotActive[k] = false; r.slotKey[k] = 0;
         r.enemy[k]->setGlobalPose(PxTransform(PxVec3(0.f, -1000.f - 10.f * k, 0.f)));
     }
+}
+
+void ReleaseEmbed(Rig& r, float ghostSeconds) {
+    if (!r.embed) return;
+    r.embed->release();
+    r.embed = nullptr;
+    if (r.embedSlot >= 0) r.ghostUntil[r.embedSlot] = r.simTime + ghostSeconds;   // let the blade leave cleanly
+    r.embedSlot = -1; r.embedKey = 0;
+}
+
+// Joint the blade to the part it went into, along the blade: it can slide deeper or back out against friction,
+// tilt a little, and nothing else. Pulled back past the entry point, it comes free.
+void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3& shaftW, float depth) {
+    ReleaseEmbed(r, 0.f);
+    const PxVec3 x(1.f, 0.f, 0.f);
+    const float d = x.dot(shaftW);
+    PxQuat rot(PxIdentity);
+    if (d < -0.9999f) rot = PxQuat(PxPi, PxVec3(0.f, 1.f, 0.f));
+    else if (d < 0.9999f) { const PxVec3 cr = x.cross(shaftW); rot = PxQuat(cr.x, cr.y, cr.z, 1.f + d).getNormalized(); }
+    const PxTransform at(point, rot);
+    PxRigidDynamic* part = r.enemy[slot];
+    PxD6Joint* j = PxD6JointCreate(*g_physics, part, part->getGlobalPose().getInverse() * at, r.body, r.body->getGlobalPose().getInverse() * at);
+    if (!j) return;
+    j->setMotion(PxD6Axis::eX, PxD6Motion::eLIMITED);
+    j->setMotion(PxD6Axis::eY, PxD6Motion::eLOCKED);
+    j->setMotion(PxD6Axis::eZ, PxD6Motion::eLOCKED);
+    j->setMotion(PxD6Axis::eTWIST, PxD6Motion::eFREE);
+    j->setMotion(PxD6Axis::eSWING1, PxD6Motion::eLIMITED);
+    j->setMotion(PxD6Axis::eSWING2, PxD6Motion::eLIMITED);
+    j->setLinearLimit(PxD6Axis::eX, PxJointLinearLimitPair(g_physics->getTolerancesScale(), -0.05f, depth));
+    j->setSwingLimit(PxJointLimitCone(0.25f, 0.25f));
+    j->setDrive(PxD6Drive::eX, PxD6JointDrive(0.f, std::fmax(ervr::Cfg().physicsBodyFriction, 0.f), PX_MAX_F32, false));
+    j->setDrivePosition(PxTransform(PxIdentity));
+    j->setDriveVelocity(PxVec3(0.f), PxVec3(0.f));
+    // A hard enough yank tears it out.
+    j->setBreakForce(std::fmax(p.force * 3.f, 500.f), std::fmax(p.torque * 3.f, 150.f));
+    r.embed = j; r.embedSlot = slot; r.embedKey = r.slotKey[slot]; r.embedSince = r.simTime;
+}
+
+// Classify each new body contact by the blow's energy and direction: cut through, stick in, pierce, or glance off.
+void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3& preAng, float h) {
+    const auto& c = ervr::Cfg();
+    for (int i = 0; i < r.nImpacts; ++i) {
+        const Impact& im = r.impacts[i];
+        const int k = im.slot;
+        if (k < 0 || k >= kMaxParts || !r.slotActive[k] || r.slotKind[k] < 3 || k == r.embedSlot || r.simTime < r.ghostUntil[k]) continue;
+        const PxTransform pose = r.body->getGlobalPose();
+        const PxVec3 com = pose.transform(r.body->getCMassLocalPose().p);
+        PxVec3 v = preLin + preAng.cross(im.point - com);
+        v -= (r.slotTo[k].p - r.slotFrom[k].p) * (1.f / std::fmax(p.dt, 1e-3f));   // relative to the moving part
+        const float speed = v.magnitude();
+        const float E = 0.5f * r.body->getMass() * speed * speed * p.strFactor;
+        r.energyMax = std::fmax(r.energyMax, E);
+        const PxVec3 s = pose.q.rotate(p.shaft);
+        const PxVec3 tip = pose.p + s * p.reach;
+        const bool thrust = speed > 0.3f && v.dot(s) / speed > 0.82f && (im.point - tip).magnitude() < 0.2f;
+        if (thrust && E >= c.physicsBodyPierceEnergy) {
+            Embed(r, p, k, im.point, s, std::fmax(p.reach * 0.6f, 0.05f));
+            ++r.pierces;
+        } else if (!thrust && E >= c.physicsBodyCutEnergy) {
+            // Through: the part lets the blade pass for a moment and the blow keeps most of its speed.
+            r.ghostUntil[k] = r.simTime + 0.3;
+            r.body->setLinearVelocity(preLin * 0.75f);
+            r.body->setAngularVelocity(preAng * 0.75f);
+            ++r.cuts;
+        } else if (!thrust && E >= c.physicsBodyStickEnergy) {
+            Embed(r, p, k, im.point, s, 0.04f);
+            ++r.sticks;
+        } else {
+            ++r.glances;
+        }
+    }
+    r.nImpacts = 0;
+    (void)h;
+}
+
+// Keep the embedded blade honest: free it when its part is gone, it was pulled out, the joint broke, or too long.
+void TendEmbed(Rig& r) {
+    if (!r.embed) return;
+    const bool gone = r.embedSlot < 0 || !r.slotActive[r.embedSlot] || r.slotKey[r.embedSlot] != r.embedKey;
+    const bool broken = (r.embed->getConstraintFlags() & PxConstraintFlag::eBROKEN);
+    const bool out = r.embed->getRelativeTransform().p.x < -0.03f;
+    if (gone || broken || out || r.simTime - r.embedSince > 4.0) ReleaseEmbed(r, 0.15f);
 }
 
 // The simulation proper. No C++ objects with destructors: called inside an SEH guard.
@@ -358,6 +459,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     SyncEnemies(r, p);
     for (int i = 0; i < kMaxParts; ++i) r.acc[i] = ContactAcc{};
     g_sink.acc = r.acc; g_sink.hits = &r.contacts;
+    r.nImpacts = 0; g_sink.impacts = r.impacts; g_sink.nImpacts = &r.nImpacts;
     const PxTransform from = r.lastTarget;
     PxQuat qTo = p.target.q;
     if (from.q.dot(qTo) < 0.f) qTo = -qTo;
@@ -372,11 +474,21 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
             if (a.dot(b) < 0.f) b = -b;
             r.enemy[k]->setKinematicTarget(PxTransform(r.slotFrom[k].p * (1.f - t) + r.slotTo[k].p * t, (a * (1.f - t) + b * t).getNormalized()));
         }
+        // Body parts the blade is passing through (or stuck in) do not collide with it.
+        for (int k = 0; k < kMaxParts; ++k) {
+            const bool solid = r.slotActive[k] && r.simTime >= r.ghostUntil[k] && k != r.embedSlot;
+            if (((r.enemyShape[k]->getFlags() & PxShapeFlag::eSIMULATION_SHAPE) ? true : false) != solid)
+                r.enemyShape[k]->setFlag(PxShapeFlag::eSIMULATION_SHAPE, solid);
+        }
+        const PxVec3 preLin = r.body->getLinearVelocity(), preAng = r.body->getAngularVelocity();
         r.scene->simulate(h);
         r.scene->fetchResults(true);
+        r.simTime += h;
+        ClassifyImpacts(r, p, preLin, preAng, h);
+        TendEmbed(r);
         ConstrainOrientation(r, p, PxTransform(pos, rot));
     }
-    g_sink.acc = nullptr; g_sink.hits = nullptr;
+    g_sink.acc = nullptr; g_sink.hits = nullptr; g_sink.impacts = nullptr; g_sink.nImpacts = nullptr;
     r.lastTarget = p.target;
     *out = r.body->getGlobalPose();
     return true;
@@ -462,6 +574,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     p.weaponKg = std::fmin(std::fmax(weight, 0.f) * std::fmax(c.physicsSwordKgPerWeight, 0.f), 60.f);
     p.reach = std::fmin(std::fmax(reach, 0.f), 4.f);
     p.com = std::fmin(std::fmax(com, 0.f), p.reach);
+    p.strFactor = std::fmin(std::fmax((float)str / 16.f, 0.5f), 3.f);
     const float tired = TiredFactor();
     g_tiredMin = std::fmin(g_tiredMin, tired);
     const float k = std::fmax(strength, 0.1f) * tired;
@@ -495,6 +608,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
             if (len < 1e-3f) continue;
             PlayPart& pp = p.parts[p.nParts++];
             pp.key = parts[i].key;
+            pp.kind = parts[i].kind;
             pp.halfHeight = len * 0.5f;
             pp.radius = parts[i].radius / scale;
             const PxVec3 x(1.f, 0.f, 0.f), dir = ToPx(d * (1.f / len));
@@ -535,10 +649,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired)",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin);
-        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0;
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax);
+        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0; r.cuts = r.sticks = r.pierces = r.glances = 0; r.energyMax = 0;
         if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
     }
 
