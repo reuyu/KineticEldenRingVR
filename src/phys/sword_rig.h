@@ -29,6 +29,8 @@ bool SwordRigStep(int h, ervr::Vec3& p, ervr::Quat& q, float dt, float weight, f
 // without having really struck a body part. ERVR's strike skips the game's attack collision for that frame, so a
 // parry or a push is not a hit. Game thread.
 bool SwordRigHoldStrike(int h);
+// The share of a vanilla hit the game's strike may deal right now: GlanceDamage after a glance, else 1.
+float SwordRigStrikeScale(int h);
 
 // Keep the game from regenerating stamina for SwingRegenDelay after swing stamina was spent. Called from every
 // character-update point the physics layer hooks. Any thread.

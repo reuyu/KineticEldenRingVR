@@ -861,7 +861,9 @@ struct Config {
     // weapon or arm (a parry, a push), a glance, or a blade at an enemy that has not struck yet deals no damage.
     bool  physicsGateStrikes = true;
     float physicsArmHitEnergy = 110.f;        // J
-    float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
+    float physicsBodyFriction = 2500.f;       // N*s/m resisting a blade sliding in or out (pulled out slowly)
+    float physicsBodyStickDepth = 0.08f;      // m a stuck slash goes in, along the blow
+    float physicsGlanceDamage = 0.1f;         // share of a hit a glance deals
     bool physicsSwingOwnOnly = true;          // a blow's speed: your hand's own motion against the part's motion in the world
                                               // (false: also the carry when the game moves you - knock-back, lock-on turning)
     // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always

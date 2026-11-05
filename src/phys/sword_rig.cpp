@@ -23,6 +23,7 @@ bool SwordRigActive() { return false; }
 bool SwordRigStep(int, ervr::Vec3&, ervr::Quat&, float, float, float, float, float, ervr::Vec3) { return false; }
 void SwordRigReset(int) {}
 bool SwordRigHoldStrike(int) { return false; }
+float SwordRigStrikeScale(int) { return 1.f; }
 void SwordRigPinStamina() {}
 
 #else
@@ -197,6 +198,13 @@ std::atomic<double> g_struckAt[2] = {-10.0, -10.0};
 std::atomic<double> g_blockedAt[2] = {-10.0, -10.0};
 std::atomic<double> g_nearAt[2] = {-10.0, -10.0};
 std::atomic<int> g_held[2] = {0, 0};
+// A stuck or pierced blade deals its blow once: from g_embedHoldFrom on, while it is in and for a moment after it
+// comes out (g_releasedAt), the game's strikes are held - pulling it out does no damage.
+std::atomic<bool> g_embedded[2] = {false, false};
+std::atomic<double> g_embedHoldFrom[2] = {1e18, 1e18};
+std::atomic<double> g_releasedAt[2] = {-10.0, -10.0};
+// A glance: the strike may land, scaled down to GlanceDamage.
+std::atomic<double> g_glanceAt[2] = {-10.0, -10.0};
 
 double NowSec() {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
@@ -489,10 +497,12 @@ void ReleaseEmbed(Rig& r, float ghostSeconds) {
     r.embed = nullptr;
     if (r.embedSlot >= 0) r.ghostUntil[r.embedSlot] = r.simTime + ghostSeconds;   // let the blade leave cleanly
     r.embedSlot = -1; r.embedKey = 0;
+    g_embedded[r.hand].store(false); g_embedHoldFrom[r.hand].store(1e18); g_releasedAt[r.hand].store(NowSec());
 }
 
-// Joint the blade to the part it went into, along the blade: it can slide deeper or back out against friction,
-// tilt a little, and nothing else. Pulled back past the entry point, it comes free.
+// Joint the blade to the part it went into, along the way it went in (a thrust: along the blade; a slash: along
+// the blow's direction): it slides in up to depth and back out against friction (BodyFriction N*s/m: pulled out
+// slowly, not all at once), tilts a little, and nothing else. Pulled back past the entry point, it comes free.
 void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3& shaftW, float depth) {
     ReleaseEmbed(r, 0.f);
     const PxVec3 x(1.f, 0.f, 0.f);
@@ -510,7 +520,7 @@ void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3&
     j->setMotion(PxD6Axis::eTWIST, PxD6Motion::eFREE);
     j->setMotion(PxD6Axis::eSWING1, PxD6Motion::eLIMITED);
     j->setMotion(PxD6Axis::eSWING2, PxD6Motion::eLIMITED);
-    j->setLinearLimit(PxD6Axis::eX, PxJointLinearLimitPair(g_physics->getTolerancesScale(), -0.05f, depth));
+    j->setLinearLimit(PxD6Axis::eX, PxJointLinearLimitPair(g_physics->getTolerancesScale(), -0.03f, depth));
     j->setSwingLimit(PxJointLimitCone(0.25f, 0.25f));
     j->setDrive(PxD6Drive::eX, PxD6JointDrive(0.f, std::fmax(ervr::Cfg().physicsBodyFriction, 0.f), PX_MAX_F32, false));
     j->setDrivePosition(PxTransform(PxIdentity));
@@ -518,6 +528,8 @@ void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3&
     // A hard enough yank tears it out.
     j->setBreakForce(std::fmax(p.force * 3.f, 500.f), std::fmax(p.torque * 3.f, 150.f));
     r.embed = j; r.embedSlot = slot; r.embedKey = r.slotKey[slot]; r.embedSince = r.simTime;
+    // The blow itself may land (the game's collision is let through briefly), then nothing until it is out.
+    g_embedded[r.hand].store(true); g_embedHoldFrom[r.hand].store(NowSec() + 0.12);
 }
 
 // Classify each new body contact by the blow's energy and direction: cut through, stick in, pierce, or glance off.
@@ -580,10 +592,20 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
             r.body->setAngularVelocity(preAng * 0.6f);
             ++r.cuts; g_struckAt[r.hand].store(wall);
         } else if (!thrust && E >= c.physicsBodyStickEnergy) {
-            Embed(r, p, k, im.point, s, 0.04f);
+            // In along the blow's direction (relative to the part), as deep as StickDepth.
+            const PxVec3 in = speed > 1e-3f ? v * (1.f / speed) : s;
+            Embed(r, p, k, im.point, in, std::fmax(c.physicsBodyStickDepth, 0.01f));
+            r.body->setLinearVelocity(PxVec3(0.f)); r.body->setAngularVelocity(PxVec3(0.f));
             ++r.sticks; g_struckAt[r.hand].store(wall);
         } else {
-            ++r.glances;
+            // Glance: the blade loses its speed into the part where it touched (the impulse that stops that point,
+            // with the mass it hits with there) and stays against it; the blow lands, weakly.
+            if (speed > 1e-3f) {
+                const PxVec3 n = v * (1.f / speed);
+                const float into = v.dot(n);
+                if (into > 0.f) PxRigidBodyExt::addForceAtPos(*r.body, n * (-mEff * into), im.point, PxForceMode::eIMPULSE);
+            }
+            ++r.glances; g_glanceAt[r.hand].store(wall);
         }
     }
     r.nImpacts = 0;
@@ -616,8 +638,8 @@ void TendEmbed(Rig& r) {
     if (!r.embed) return;
     const bool gone = r.embedSlot < 0 || !r.slotActive[r.embedSlot] || r.slotKey[r.embedSlot] != r.embedKey;
     const bool broken = (r.embed->getConstraintFlags() & PxConstraintFlag::eBROKEN);
-    const bool out = r.embed->getRelativeTransform().p.x < -0.03f;
-    if (gone || broken || out || r.simTime - r.embedSince > 4.0) ReleaseEmbed(r, 0.15f);
+    const bool out = r.embed->getRelativeTransform().p.x < -0.02f;
+    if (gone || broken || out || r.simTime - r.embedSince > 10.0) ReleaseEmbed(r, 0.15f);
 }
 
 // The simulation proper. No C++ objects with destructors: called inside an SEH guard.
@@ -626,7 +648,11 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     if (!RigCreate(r)) return false;
     UpdateMass(r, p);
     UpdateDrives(r, p);
-    if (!r.placed || (r.body->getGlobalPose().p - p.target.p).magnitude() > p.snap) { if (r.placed) ++r.snaps; Place(r, p.target); }
+    if (!r.placed || (r.body->getGlobalPose().p - p.target.p).magnitude() > p.snap) {
+        if (r.placed) ++r.snaps;
+        ReleaseEmbed(r, 0.3f);   // your hand went too far from a stuck blade: it comes out (no damage)
+        Place(r, p.target);
+    }
     // Move the controller anchor smoothly across sub-steps (<= 1/240 s each) so stiff drives stay stable.
     // 480 Hz: an enemy weapon swung at 20 m/s moves 4 cm per sub-step, less than the two capsules' radii.
     const int n = (int)std::ceil(p.dt * 480.f) < 1 ? 1 : (int)std::ceil(p.dt * 480.f) > 16 ? 16 : (int)std::ceil(p.dt * 480.f);
@@ -785,10 +811,22 @@ bool SwordRigHoldStrike(int h) {
     const auto& c = ervr::Cfg();
     if (h < 0 || h > 1 || !c.physicsGateStrikes || !c.physicsContact || !SwordRigActive()) return false;
     const double now = NowSec();
+    // A stuck blade dealt its blow when it went in: nothing while it is in or being pulled out.
+    if ((g_embedded[h].load() && now >= g_embedHoldFrom[h].load()) || now - g_releasedAt[h].load() < 0.4) { g_held[h].fetch_add(1); return true; }
     if (now - g_struckAt[h].load() < 0.35) return false;   // it really struck: the game's collision may deal it
+    if (now - g_glanceAt[h].load() < 0.35) return false;   // a glance: it lands, scaled by SwordRigStrikeScale
     const bool hold = now - g_blockedAt[h].load() < 0.4 || now - g_nearAt[h].load() < 0.15;
     if (hold) g_held[h].fetch_add(1);
     return hold;
+}
+
+float SwordRigStrikeScale(int h) {
+    const auto& c = ervr::Cfg();
+    if (h < 0 || h > 1 || !c.physicsGateStrikes || !c.physicsContact || !SwordRigActive()) return 1.f;
+    const double now = NowSec();
+    if (now - g_struckAt[h].load() < 0.35) return 1.f;
+    if (now - g_glanceAt[h].load() < 0.35) return std::fmin(std::fmax(c.physicsGlanceDamage, 0.f), 1.f);
+    return 1.f;
 }
 
 bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight, float reach, float com,

@@ -1649,6 +1649,7 @@ void GameFrameBody(uint8_t* player) {
                     if (mult > remain) mult = remain;
                 }
             } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
+            mult *= kinetic::SwordRigStrikeScale(h);   // a glance lands weakly (GlanceDamage)
             if (r) {
                 // After the first landed hit-frame the strike keeps its damage but loses its hit
                 // reaction (dmg_level/hitstop/poise -> 0): one flinch per swing, no stunlock.
