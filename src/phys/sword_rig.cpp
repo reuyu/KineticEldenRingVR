@@ -169,6 +169,14 @@ struct Rig {
     double simTime = 0;
     Impact impacts[kMaxImpacts]; int nImpacts = 0;
     PxD6Joint* embed = nullptr; int embedSlot = -1; uint32_t embedKey = 0; double embedSince = 0;
+    float embedBack = 0.02f;                     // m back along the way in (past the entry) before it comes free
+    // A slash going into a part (TendCut): the part lets the blade through while it resists; out the other side is a
+    // cut, slowed below BodyStickSpeed still inside is stuck.
+    bool cutting[kMaxParts]{}, cutInside[kMaxParts]{};
+    uint32_t cutKey[kMaxParts]{};
+    double cutSince[kMaxParts]{};
+    PxVec3 cutDir[kMaxParts];
+    float cutDepth[kMaxParts]{};
     int cuts = 0, sticks = 0, pierces = 0, glances = 0; float energyMax = 0;
     int hand = 0;
     int parries = 0, armPushes = 0, armHits = 0;
@@ -504,7 +512,7 @@ void ReleaseEmbed(Rig& r, float ghostSeconds) {
 // Joint the blade to the part it went into, along the way it went in (a thrust: along the blade; a slash: along
 // the blow's direction): it slides in up to depth and back out against friction (BodyFriction N*s/m: pulled out
 // slowly, not all at once), tilts a little, and nothing else. Pulled back past the entry point, it comes free.
-void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3& shaftW, float depth) {
+void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3& shaftW, float depth, float back = 0.02f) {
     ReleaseEmbed(r, 0.f);
     const PxVec3 x(1.f, 0.f, 0.f);
     const float d = x.dot(shaftW);
@@ -521,14 +529,14 @@ void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3&
     j->setMotion(PxD6Axis::eTWIST, PxD6Motion::eFREE);
     j->setMotion(PxD6Axis::eSWING1, PxD6Motion::eLIMITED);
     j->setMotion(PxD6Axis::eSWING2, PxD6Motion::eLIMITED);
-    j->setLinearLimit(PxD6Axis::eX, PxJointLinearLimitPair(g_physics->getTolerancesScale(), -0.03f, depth));
+    j->setLinearLimit(PxD6Axis::eX, PxJointLinearLimitPair(g_physics->getTolerancesScale(), -(back + 0.02f), depth));
     j->setSwingLimit(PxJointLimitCone(0.25f, 0.25f));
     j->setDrive(PxD6Drive::eX, PxD6JointDrive(0.f, std::fmax(ervr::Cfg().physicsBodyFriction, 0.f), PX_MAX_F32, false));
     j->setDrivePosition(PxTransform(PxIdentity));
     j->setDriveVelocity(PxVec3(0.f), PxVec3(0.f));
     // A hard enough yank tears it out.
     j->setBreakForce(std::fmax(p.force * 3.f, 500.f), std::fmax(p.torque * 3.f, 150.f));
-    r.embed = j; r.embedSlot = slot; r.embedKey = r.slotKey[slot]; r.embedSince = r.simTime;
+    r.embed = j; r.embedSlot = slot; r.embedKey = r.slotKey[slot]; r.embedSince = r.simTime; r.embedBack = std::fmax(back, 0.01f);
     // The blow itself may land (the game's collision is let through briefly), then nothing until it is out.
     g_embedded[r.hand].store(true); g_embedHoldFrom[r.hand].store(NowSec() + 0.12);
 }
@@ -586,18 +594,15 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
         if (thrust && E >= c.physicsBodyPierceEnergy) {
             Embed(r, p, k, im.point, s, std::fmax(p.reach * 0.6f, 0.05f));
             ++r.pierces; g_struckAt[r.hand].store(wall);
-        } else if (!thrust && E >= c.physicsBodyCutEnergy) {
-            // Through: the part lets the blade pass for a moment; cutting through costs the blow some of its speed.
-            r.ghostUntil[k] = r.simTime + 0.3;
-            r.body->setLinearVelocity(preLin * 0.6f);
-            r.body->setAngularVelocity(preAng * 0.6f);
-            ++r.cuts; g_struckAt[r.hand].store(wall);
         } else if (!thrust && E >= c.physicsBodyStickEnergy) {
-            // In along the blow's direction (relative to the part), as deep as StickDepth.
-            const PxVec3 in = speed > 1e-3f ? v * (1.f / speed) : s;
-            Embed(r, p, k, im.point, in, std::fmax(c.physicsBodyStickDepth, 0.01f));
-            r.body->setLinearVelocity(PxVec3(0.f)); r.body->setAngularVelocity(PxVec3(0.f));
-            ++r.sticks; g_struckAt[r.hand].store(wall);
+            // In: the part lets the blade through and resists it (TendCut): out the other side is a cut, slowed
+            // down still inside is stuck. The blow lands as it goes in.
+            if (!r.cutting[k]) {
+                r.cutting[k] = true; r.cutInside[k] = false; r.cutKey[k] = r.slotKey[k]; r.cutSince[k] = r.simTime;
+                r.cutDir[k] = speed > 1e-3f ? v * (1.f / speed) : s; r.cutDepth[k] = 0.f;
+            }
+            r.ghostUntil[k] = r.simTime + 5.0;
+            g_struckAt[r.hand].store(wall);
         } else {
             // Glance: the blade loses its speed into the part where it touched (the impulse that stops that point,
             // with the mass it hits with there) and stays against it; the blow lands, weakly.
@@ -634,12 +639,92 @@ float SegSeg(const PxVec3& p1, const PxVec3& q1, const PxVec3& p2, const PxVec3&
     return ((p1 + d1 * s) - (p2 + d2 * t)).magnitude();
 }
 
+// The point of segment p1-q1 closest to segment p2-q2.
+PxVec3 ClosestOnFirst(const PxVec3& p1, const PxVec3& q1, const PxVec3& p2, const PxVec3& q2) {
+    const PxVec3 d1 = q1 - p1, d2 = q2 - p2, rr = p1 - p2;
+    const float a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(rr);
+    auto cl = [](float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; };
+    if (a <= 1e-8f) return p1;
+    float s = 0.f;
+    const float cc = d1.dot(rr);
+    if (e <= 1e-8f) s = cl(-cc / a);
+    else {
+        const float b = d1.dot(d2), den = a * e - b * b;
+        s = den > 1e-8f ? cl((b * f - cc * e) / den) : 0.f;
+        const float t = (b * s + f) / e;
+        if (t < 0.f) s = cl(-cc / a); else if (t > 1.f) s = cl((b - cc) / a);
+    }
+    return p1 + d1 * s;
+}
+
+// A slash inside a part: the part resists the blade (BodyCutResistance N against its motion where it is in,
+// never more than stops that point), so it loses speed the deeper it goes. Out the other side: a cut. Slower than
+// BodyStickSpeed still inside: stuck there, and it comes out only pulled back the way it went in.
+void TendCut(Rig& r, const Params& p, float h) {
+    const auto& c = ervr::Cfg();
+    if (!r.blade) return;
+    const PxTransform bp = r.body->getGlobalPose();
+    const PxTransform bladePose = bp * r.blade->getLocalPose();
+    const PxCapsuleGeometry& bg = static_cast<const PxCapsuleGeometry&>(r.blade->getGeometry());
+    const PxVec3 bax = bladePose.q.rotate(PxVec3(1.f, 0.f, 0.f));
+    const PxVec3 b0 = bladePose.p - bax * bg.halfHeight, b1 = bladePose.p + bax * bg.halfHeight;
+    const PxVec3 com = bp.transform(r.body->getCMassLocalPose().p);
+    for (int k = 0; k < kMaxParts; ++k) {
+        if (!r.cutting[k]) continue;
+        if (!r.slotActive[k] || r.slotKey[k] != r.cutKey[k] || r.embed) {
+            r.cutting[k] = false;
+            if (k != r.embedSlot) r.ghostUntil[k] = r.simTime + 0.05;
+            continue;
+        }
+        PxShape* sh = r.slotBox[k] ? r.enemyBox[k] : r.enemyShape[k];
+        const PxTransform pp = r.enemy[k]->getGlobalPose() * sh->getLocalPose();
+        const bool inside = PxGeometryQuery::overlap(bg, bladePose, sh->getGeometry(), pp);
+        if (!inside) {
+            if (r.cutInside[k] || r.simTime - r.cutSince[k] > 0.15) {
+                if (r.cutInside[k]) ++r.cuts;   // through
+                r.cutting[k] = false; r.ghostUntil[k] = r.simTime + 0.05;
+            }
+            continue;
+        }
+        r.cutInside[k] = true;
+        float hh;
+        if (r.slotBox[k]) hh = static_cast<const PxBoxGeometry&>(sh->getGeometry()).halfExtents.x;
+        else hh = static_cast<const PxCapsuleGeometry&>(sh->getGeometry()).halfHeight;
+        const PxVec3 pax = pp.q.rotate(PxVec3(1.f, 0.f, 0.f));
+        const PxVec3 pt = ClosestOnFirst(b0, b1, pp.p - pax * hh, pp.p + pax * hh);
+        const PxVec3 vB = r.body->getLinearVelocity() + r.body->getAngularVelocity().cross(pt - com);
+        const PxVec3 vP = (c.physicsSwingOwnOnly && r.slotHaveVel[k]) ? r.slotWorldVel[k]
+                                                                      : (r.slotTo[k].p - r.slotFrom[k].p) * (1.f / std::fmax(p.dt, 1e-3f));
+        const PxVec3 rel = vB - vP;
+        const float spd = rel.magnitude();
+        if (spd < std::fmax(c.physicsBodyStickSpeed, 0.05f)) {
+            // Stuck where it stopped: back out the way it came, as far as it went in.
+            const float depth = r.cutDepth[k];
+            r.cutting[k] = false;
+            Embed(r, p, k, pt, r.cutDir[k], 0.05f, std::fmax(depth, 0.02f));
+            ++r.sticks;
+            for (int j = 0; j < kMaxParts; ++j) if (j != k && r.cutting[j]) { r.cutting[j] = false; r.ghostUntil[j] = r.simTime + 0.05; }
+            return;
+        }
+        const PxVec3 dir = rel * (1.f / spd);
+        r.cutDir[k] = dir;
+        r.cutDepth[k] += spd * h;
+        // The mass the resistance acts on at that point (as in ClassifyImpacts), so it never reverses the blade.
+        const PxVec3 rn = (pt - com).cross(dir);
+        const PxQuat qm = bp.q * r.body->getCMassLocalPose().q;
+        const PxVec3 l = qm.rotateInv(rn), inv = r.body->getMassSpaceInvInertiaTensor();
+        const float mEff = 1.f / (1.f / std::fmax(r.body->getMass(), 1e-3f) + l.x * l.x * inv.x + l.y * l.y * inv.y + l.z * l.z * inv.z);
+        const float J = std::fmin(std::fmax(c.physicsBodyCutResistance, 0.f) * h, mEff * spd);
+        PxRigidBodyExt::addForceAtPos(*r.body, dir * -J, pt, PxForceMode::eIMPULSE);
+    }
+}
+
 // Keep the embedded blade honest: free it when its part is gone, it was pulled out, the joint broke, or too long.
 void TendEmbed(Rig& r) {
     if (!r.embed) return;
     const bool gone = r.embedSlot < 0 || !r.slotActive[r.embedSlot] || r.slotKey[r.embedSlot] != r.embedKey;
     const bool broken = (r.embed->getConstraintFlags() & PxConstraintFlag::eBROKEN);
-    const bool out = r.embed->getRelativeTransform().p.x < -0.02f;
+    const bool out = r.embed->getRelativeTransform().p.x < -r.embedBack;
     if (gone || broken || out || r.simTime - r.embedSince > 10.0) ReleaseEmbed(r, 0.15f);
 }
 
@@ -717,6 +802,7 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
                 if (r.wDyn[k]) r.wContactUntil[k] = r.simTime + 0.3;
             }
         ClassifyImpacts(r, p, preLin, preAng, h);
+        TendCut(r, p, h);
         TendEmbed(r);
         ConstrainOrientation(r, p, PxTransform(pos, rot));
     }
