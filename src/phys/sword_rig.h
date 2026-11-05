@@ -25,6 +25,11 @@ bool SwordRigActive();
 bool SwordRigStep(int h, ervr::Vec3& p, ervr::Quat& q, float dt, float weight, float reach, float com,
                   float strength, ervr::Vec3 shaftAxis);
 
+// Strike gate: true while hand h's blade is at an enemy (on its weapon, pushed off its arm, or touching any part)
+// without having really struck a body part. ERVR's strike skips the game's attack collision for that frame, so a
+// parry or a push is not a hit. Game thread.
+bool SwordRigHoldStrike(int h);
+
 // Forget hand h's state (the next step starts exactly at the controller). h < 0: both hands.
 void SwordRigReset(int h = -1);
 

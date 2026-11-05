@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 #include <deque>
 #include <unordered_map>
 
@@ -18,7 +19,7 @@ namespace {
 
 using ervr::Vec3;
 
-struct Sample { double t; float dBody; bool shield; float speed; };
+struct Sample { double t; float dBody; bool shield; float speed; float dRoot; float dCand[6]; };
 struct WeaponTrack { Vec3 lastTip{}; double lastT = 0; bool have = false; std::deque<Sample> hist; };
 
 std::unordered_map<uint32_t, WeaponTrack> g_tracks;
@@ -26,6 +27,10 @@ int g_prevHp = -1;
 double g_logAt = 0;
 int g_kept = 0, g_refunded = 0, g_grazed = 0, g_shielded = 0, g_untouched = 0;   // statistics for the log
 long g_hpBack = 0, g_hpKept = 0, g_shieldStam = 0;
+// Weapon axis learning: per candidate axis, how many blows it would have reached you on.
+int g_axisReach[6] = {}, g_axisTrials = 0;
+std::atomic<int> g_axisBest{-1};
+const char* kAxisName[6] = {"+x", "-x", "+y", "-y", "+z", "-z"};
 
 float Clamp01(float v) { return v < 0.f ? 0.f : v > 1.f ? 1.f : v; }
 
@@ -55,6 +60,15 @@ float SegPointDistance(const Vec3& p, const Vec3& q, const Vec3& x) { return Seg
 }  // namespace
 
 void HitJudgeReset() { g_tracks.clear(); g_prevHp = -1; }
+
+int HitJudgeWeaponAxis() { return g_axisBest.load(); }
+
+namespace {
+bool AutoAxis() {
+    const std::string& a = ervr::Cfg().physicsEnemyWeaponAxis;
+    return a.empty() || a[0] == 'a' || a[0] == 'A';
+}
+}  // namespace
 
 void HitJudgeFrame(uint8_t* player, double now) {
     const auto& c = ervr::Cfg();
@@ -89,7 +103,12 @@ void HitJudgeFrame(uint8_t* player, double now) {
         w.lastTip = b; w.lastT = now; w.have = true;
         const float dBody = SegSegDistance(a, b, b0, b1) - bodyR - parts[i].radius;
         const bool onShield = shield && SegPointDistance(a, b, shieldC) < shieldR + parts[i].radius;
-        w.hist.push_back({now, dBody, onShield, speed});
+        Sample smp{now, dBody, onShield, speed, SegPointDistance(b0, b1, a) - bodyR, {}};
+        for (int k = 0; k < 6; ++k) {
+            const Vec3 ax = parts[i].axis[k / 2] * (k % 2 ? -1.f : 1.f);
+            smp.dCand[k] = SegSegDistance(a, a + ax * parts[i].length, b0, b1) - bodyR - parts[i].radius;
+        }
+        w.hist.push_back(smp);
     }
     for (auto it = g_tracks.begin(); it != g_tracks.end();) {
         auto& h = it->second.hist;
@@ -105,12 +124,40 @@ void HitJudgeFrame(uint8_t* player, double now) {
         bool near = false, touched = false, shielded = false;
         float touchSpeed = 0.f;
         double firstShield = 1e18, firstBody = 1e18;
+        float candMin[6] = {1e9f, 1e9f, 1e9f, 1e9f, 1e9f, 1e9f};
+        const bool learned = !AutoAxis() || g_axisBest.load() >= 0;
         for (const auto& kv : g_tracks)
             for (const Sample& s : kv.second.hist) {
-                if (s.dBody < 1.0f) near = true;
+                if (s.dRoot < 1.2f) near = true;   // the weapon's grip came within reach, whatever its blade axis
                 if (s.shield) { shielded = true; firstShield = std::min(firstShield, s.t); }
-                if (s.dBody < 0.f) { touched = true; touchSpeed = std::max(touchSpeed, s.speed); firstBody = std::min(firstBody, s.t); }
+                for (int k = 0; k < 6; ++k) candMin[k] = std::min(candMin[k], s.dCand[k]);
+                // Until the blade axis is known, any axis that would have reached you counts as a touch.
+                float d = s.dBody;
+                if (!learned) for (int k = 0; k < 6; ++k) d = std::min(d, s.dCand[k]);
+                if (d < 0.f) { touched = true; touchSpeed = std::max(touchSpeed, s.speed); firstBody = std::min(firstBody, s.t); }
             }
+        // Learn the axis: on a blow that came with an enemy weapon near, the true blade axis must have reached you.
+        if (near && !shielded) {
+            ++g_axisTrials;
+            for (int k = 0; k < 6; ++k) if (candMin[k] < 0.05f) ++g_axisReach[k];
+            int best = -1, second = 0;
+            for (int k = 0; k < 6; ++k) {
+                if (best < 0 || g_axisReach[k] > g_axisReach[best]) { if (best >= 0) second = std::max(second, g_axisReach[best]); best = k; }
+                else second = std::max(second, g_axisReach[k]);
+            }
+            const int prev = g_axisBest.load();
+            if (g_axisTrials >= 3 && best >= 0 && g_axisReach[best] >= 2 && g_axisReach[best] > second && best != prev) {
+                g_axisBest.store(best);
+                LOGI("[phys] weapon axis: %s reached you on %d of %d blows (next best %d)%s", kAxisName[best], g_axisReach[best], g_axisTrials, second,
+                     AutoAxis() ? " - the enemy weapon capsule now uses it" : " - set [Physics] EnemyWeaponAxis to it (or auto)");
+            }
+            if (c.physicsContactLog)
+                LOGI("[phys] weapon axis check: closest to your body +x %.2f -x %.2f +y %.2f -y %.2f +z %.2f -z %.2f m (reached so far %d/%d/%d/%d/%d/%d of %d)",
+                     candMin[0], candMin[1], candMin[2], candMin[3], candMin[4], candMin[5],
+                     g_axisReach[0], g_axisReach[1], g_axisReach[2], g_axisReach[3], g_axisReach[4], g_axisReach[5], g_axisTrials);
+        }
+        // With [Combat] Block on the shield is the game's own guard: it already blocked (and charged stamina).
+        if (c.blockEnabled) shielded = false;
         if (near || shielded) {
             int refund = 0;
             const char* why;

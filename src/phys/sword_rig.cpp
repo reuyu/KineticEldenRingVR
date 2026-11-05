@@ -22,6 +22,7 @@ namespace kinetic {
 bool SwordRigActive() { return false; }
 bool SwordRigStep(int, ervr::Vec3&, ervr::Quat&, float, float, float, float, float, ervr::Vec3) { return false; }
 void SwordRigReset(int) {}
+bool SwordRigHoldStrike(int) { return false; }
 
 #else
 
@@ -156,8 +157,18 @@ struct Rig {
     Impact impacts[kMaxImpacts]; int nImpacts = 0;
     PxD6Joint* embed = nullptr; int embedSlot = -1; uint32_t embedKey = 0; double embedSince = 0;
     int cuts = 0, sticks = 0, pierces = 0, glances = 0; float energyMax = 0;
+    int hand = 0;
+    int parries = 0, armPushes = 0, armHits = 0;
 };
 Rig g_rig[2];
+
+// Strike gate (combat.cpp asks SwordRigHoldStrike every game frame): when this hand's blade last struck for real
+// (a body part cut, stuck or pierced, an arm hit hard), last met an enemy weapon or was pushed off an arm, and
+// last was at an enemy part at all. Wall-clock seconds.
+std::atomic<double> g_struckAt[2] = {-10.0, -10.0};
+std::atomic<double> g_blockedAt[2] = {-10.0, -10.0};
+std::atomic<double> g_nearAt[2] = {-10.0, -10.0};
+std::atomic<int> g_held[2] = {0, 0};
 
 double NowSec() {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
@@ -412,10 +423,11 @@ void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3&
 // Classify each new body contact by the blow's energy and direction: cut through, stick in, pierce, or glance off.
 void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3& preAng, float h) {
     const auto& c = ervr::Cfg();
+    const double wall = NowSec();
     for (int i = 0; i < r.nImpacts; ++i) {
         const Impact& im = r.impacts[i];
         const int k = im.slot;
-        if (k < 0 || k >= kMaxParts || !r.slotActive[k] || r.slotKind[k] < 3 || k == r.embedSlot || r.simTime < r.ghostUntil[k]) continue;
+        if (k < 0 || k >= kMaxParts || !r.slotActive[k] || k == r.embedSlot || r.simTime < r.ghostUntil[k]) continue;
         const PxTransform pose = r.body->getGlobalPose();
         const PxVec3 com = pose.transform(r.body->getCMassLocalPose().p);
         PxVec3 v = preLin + preAng.cross(im.point - com);
@@ -423,27 +435,55 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
         const float speed = v.magnitude();
         const float E = 0.5f * r.body->getMass() * speed * speed * p.strFactor;
         r.energyMax = std::fmax(r.energyMax, E);
+        const int kind = r.slotKind[k];
+        if (kind == 2) { g_blockedAt[r.hand].store(wall); ++r.parries; continue; }   // blade on blade: a parry, never a hit
+        if (kind < 2) {                                                               // an arm: pushed, or hit hard
+            if (E >= c.physicsArmHitEnergy) { g_struckAt[r.hand].store(wall); ++r.armHits; }
+            else { g_blockedAt[r.hand].store(wall); ++r.armPushes; }
+            continue;
+        }
         const PxVec3 s = pose.q.rotate(p.shaft);
         const PxVec3 tip = pose.p + s * p.reach;
         const bool thrust = speed > 0.3f && v.dot(s) / speed > 0.82f && (im.point - tip).magnitude() < 0.2f;
         if (thrust && E >= c.physicsBodyPierceEnergy) {
             Embed(r, p, k, im.point, s, std::fmax(p.reach * 0.6f, 0.05f));
-            ++r.pierces;
+            ++r.pierces; g_struckAt[r.hand].store(wall);
         } else if (!thrust && E >= c.physicsBodyCutEnergy) {
-            // Through: the part lets the blade pass for a moment and the blow keeps most of its speed.
+            // Through: the part lets the blade pass for a moment; cutting through costs the blow some of its speed.
             r.ghostUntil[k] = r.simTime + 0.3;
-            r.body->setLinearVelocity(preLin * 0.75f);
-            r.body->setAngularVelocity(preAng * 0.75f);
-            ++r.cuts;
+            r.body->setLinearVelocity(preLin * 0.6f);
+            r.body->setAngularVelocity(preAng * 0.6f);
+            ++r.cuts; g_struckAt[r.hand].store(wall);
         } else if (!thrust && E >= c.physicsBodyStickEnergy) {
             Embed(r, p, k, im.point, s, 0.04f);
-            ++r.sticks;
+            ++r.sticks; g_struckAt[r.hand].store(wall);
         } else {
             ++r.glances;
         }
     }
     r.nImpacts = 0;
     (void)h;
+}
+
+// Closest distance between segments p1-q1 and p2-q2.
+float SegSeg(const PxVec3& p1, const PxVec3& q1, const PxVec3& p2, const PxVec3& q2) {
+    const PxVec3 d1 = q1 - p1, d2 = q2 - p2, rr = p1 - p2;
+    const float a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(rr);
+    auto cl = [](float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; };
+    float s = 0.f, t = 0.f;
+    if (a <= 1e-8f && e <= 1e-8f) return rr.magnitude();
+    if (a <= 1e-8f) t = cl(f / e);
+    else {
+        const float cc = d1.dot(rr);
+        if (e <= 1e-8f) s = cl(-cc / a);
+        else {
+            const float b = d1.dot(d2), den = a * e - b * b;
+            s = den > 1e-8f ? cl((b * f - cc * e) / den) : 0.f;
+            t = (b * s + f) / e;
+            if (t < 0.f) { t = 0.f; s = cl(-cc / a); } else if (t > 1.f) { t = 1.f; s = cl((b - cc) / a); }
+        }
+    }
+    return ((p1 + d1 * s) - (p2 + d2 * t)).magnitude();
 }
 
 // Keep the embedded blade honest: free it when its part is gone, it was pulled out, the joint broke, or too long.
@@ -514,13 +554,23 @@ float g_stamDebt = 0.f;
 int g_stam = -1, g_stamMax = -1;
 double g_stamReadAt = -10;
 float g_stamSpent = 0.f, g_tiredMin = 1.f;
+double g_regenHoldUntil = 0;   // the game may not regenerate stamina before this (wall clock)
+int g_stamHeld = -1;            // the bar as our last drain left it
 
 // Arm strength multiplier from how tired the player is (1 = fresh).
 float TiredFactor() {
     const auto& c = ervr::Cfg();
     if (!c.physicsSwingStamina) return 1.f;
     const double now = NowSec();
-    if (now - g_stamReadAt > 0.05) { g_stamReadAt = now; g_stam = ervr::CombatPlayerStamina(&g_stamMax); }
+    if (now - g_stamReadAt > 0.05) {
+        g_stamReadAt = now; g_stam = ervr::CombatPlayerStamina(&g_stamMax);
+        // Right after a swing the game's regeneration would refill the bar at once and the tired arm would never
+        // be felt: hold the bar where the swings left it for SwingRegenDelay (it may still fall).
+        if (now < g_regenHoldUntil && g_stamHeld >= 0 && g_stam >= 0) {
+            if (g_stam > g_stamHeld) { ervr::CombatSetPlayerStamina(g_stamHeld); g_stam = g_stamHeld; }
+            else g_stamHeld = g_stam;
+        }
+    }
     if (g_stam < 0 || g_stamMax <= 0) return 1.f;
     const float frac = (float)g_stam / (float)g_stamMax, below = std::fmax(c.physicsTiredBelow, 0.01f);
     if (frac >= below) return 1.f;
@@ -542,6 +592,8 @@ void DrainSwing(float tipSpeed, float weaponKg, float dt) {
     if (cur <= 0) { g_stamDebt = 0.f; return; }
     ervr::CombatSetPlayerStamina(cur - take);
     g_stam = cur - take < 0 ? 0 : cur - take; g_stamMax = maxS;
+    g_stamHeld = g_stam;
+    g_regenHoldUntil = NowSec() + std::fmax(c.physicsSwingRegenDelay, 0.f);
     g_stamSpent += (float)take;
 }
 
@@ -565,11 +617,22 @@ bool SwordRigActive() {
 
 void SwordRigReset(int h) { g_resetMask.fetch_or(h < 0 ? 3 : (1 << (h & 1))); }
 
+bool SwordRigHoldStrike(int h) {
+    const auto& c = ervr::Cfg();
+    if (h < 0 || h > 1 || !c.physicsGateStrikes || !c.physicsContact || !SwordRigActive()) return false;
+    const double now = NowSec();
+    if (now - g_struckAt[h].load() < 0.35) return false;   // it really struck: the game's collision may deal it
+    const bool hold = now - g_blockedAt[h].load() < 0.4 || now - g_nearAt[h].load() < 0.15;
+    if (hold) g_held[h].fetch_add(1);
+    return hold;
+}
+
 bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight, float reach, float com,
                   float strength, ervr::Vec3 shaftAxis) {
     if (h < 0 || h > 1 || !(dt > 0.f && dt <= 0.1f) || !SwordRigActive()) return false;
     if (!EngineCreate()) return false;
     Rig& r = g_rig[h];
+    r.hand = h;
     if (g_resetMask.load() & (1 << h)) { g_resetMask.fetch_and(~(1 << h)); r.placed = false; r.haveTip = false; }
 
     const auto& c = ervr::Cfg();
@@ -651,6 +714,20 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
         }
     }
 
+    // Strike gate: is the blade at an enemy part right now (within a few cm)?
+    if (mapped) {
+        const PxVec3 g0 = out.p, g1 = out.p + out.q.rotate(p.shaft) * p.reach;
+        const float margin = 0.08f / scale;
+        for (int k = 0; k < kMaxParts; ++k) {
+            if (!r.slotActive[k]) continue;
+            const PxTransform& t = r.slotTo[k];
+            const PxVec3 ax = t.q.rotate(PxVec3(1.f, 0.f, 0.f));
+            const PxCapsuleGeometry& g = static_cast<const PxCapsuleGeometry&>(r.enemyShape[k]->getGeometry());
+            const float d = SegSeg(g0, g1, t.p - ax * g.halfHeight, t.p + ax * g.halfHeight) - g.radius - 0.035f;
+            if (d < margin) { g_nearAt[h].store(NowSec()); break; }
+        }
+    }
+
     // Statistics: how far the simulated grip trails the real hand.
     const float lag = (out.p - p.target.p).magnitude();
     PxQuat dq = p.target.q.getConjugate() * out.q;
@@ -661,9 +738,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s)",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax);
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0));
+        r.parries = r.armPushes = r.armHits = 0;
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0; r.cuts = r.sticks = r.pierces = r.glances = 0; r.energyMax = 0;
         if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
     }

@@ -4,6 +4,7 @@
 #include "config.h"
 #include "game_er.h"
 #include "game_memory.h"
+#include "hit_judge.h"
 #include "log.h"
 #include "pose_override.h"
 
@@ -123,7 +124,13 @@ void ContactFrame(uint8_t* player, double now) {
     const float k = std::max(c.physicsEnemyArmStiffness, 0.f);
     const float damp = 2.f * std::max(c.physicsEnemyArmDamping, 0.f) * std::sqrt(k * inertia);
     const float maxRad = std::min(std::max(c.physicsEnemyArmMaxDeg, 0.f), 150.f) * 0.0174533f;
-    const Vec3 weaponAxis = AxisFrom(c.physicsEnemyWeaponAxis);
+    Vec3 weaponAxis = AxisFrom(c.physicsEnemyWeaponAxis);
+    if (c.physicsEnemyWeaponAxis.empty() || std::tolower((unsigned char)c.physicsEnemyWeaponAxis[0]) == 'a') {
+        // auto: the axis the hit judge has learned from the blows you took (+x until it knows).
+        static const Vec3 kAxes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        const int learned = HitJudgeWeaponAxis();
+        weaponAxis = learned >= 0 && learned < 6 ? kAxes[learned] : kAxes[0];
+    }
 
     for (auto& a : g_arms) a.seen = false;
     std::vector<Quat> mq; std::vector<Vec3> mp;
@@ -169,12 +176,15 @@ void ContactFrame(uint8_t* player, double now) {
             const Quat R = FromRotVec(a->theta);
             auto swung = [&](const Vec3& p) { return S + R.Rotate(p - S); };
             const Vec3 E = swung(world(fa[s])), H = swung(world(hd[s]));
-            g_parts.push_back({PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f});
-            g_parts.push_back({PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f});
+            g_parts.push_back({PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f, {}, 0.f});
+            g_parts.push_back({PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f, {}, 0.f});
             if (s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f) {
                 const Vec3 W = swung(world(wb));
-                const Vec3 dir = R.Rotate(rootQ.Rotate(mq[wb].Rotate(weaponAxis)));
-                g_parts.push_back({PartKey(t.chr, s, 2), t.chr, s, 2, W, W + dir * c.physicsEnemyWeaponLength, 0.035f});
+                const Quat wq = (R * rootQ * mq[wb]).Normalized();
+                const Vec3 dir = wq.Rotate(weaponAxis);
+                ContactPart wp{PartKey(t.chr, s, 2), t.chr, s, 2, W, W + dir * c.physicsEnemyWeaponLength, 0.035f, {}, c.physicsEnemyWeaponLength};
+                wp.axis[0] = wq.Rotate(Vec3{1, 0, 0}); wp.axis[1] = wq.Rotate(Vec3{0, 1, 0}); wp.axis[2] = wq.Rotate(Vec3{0, 0, 1});
+                g_parts.push_back(wp);
             }
             // Draw the swing: rotate the upper arm in model space about its own origin (the shoulder).
             if (a->theta.Length() > 0.0035f) {
@@ -187,16 +197,16 @@ void ContactFrame(uint8_t* player, double now) {
         // The body: torso, head, thighs and calves. These do not swing; the blade cuts, sticks or glances on them.
         if (c.physicsBodyContact) {
             const int pel = TrackerBoneIndex(t.hkb, "Pelvis"), neck = TrackerBoneIndex(t.hkb, "Neck"), head = TrackerBoneIndex(t.hkb, "Head");
-            if (pel >= 0 && neck >= 0) g_parts.push_back({PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.16f});
+            if (pel >= 0 && neck >= 0) g_parts.push_back({PartKey(t.chr, 0, 3), t.chr, 0, 3, world(pel), world(neck), 0.16f, {}, 0.f});
             if (head >= 0) {
                 const Vec3 hp = world(head), up = rootQ.Rotate(Vec3{0, 1, 0});
-                g_parts.push_back({PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f});
+                g_parts.push_back({PartKey(t.chr, 0, 4), t.chr, 0, 4, hp, hp + up * 0.12f, 0.11f, {}, 0.f});
             }
             static const char* thighN[2] = {"L_Thigh", "R_Thigh"}, *calfN[2] = {"L_Calf", "R_Calf"}, *footN[2] = {"L_Foot", "R_Foot"};
             for (int s = 0; s < 2; ++s) {
                 const int th = TrackerBoneIndex(t.hkb, thighN[s]), ca = TrackerBoneIndex(t.hkb, calfN[s]), fo = TrackerBoneIndex(t.hkb, footN[s]);
-                if (th >= 0 && ca >= 0) g_parts.push_back({PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f});
-                if (ca >= 0 && fo >= 0) g_parts.push_back({PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f});
+                if (th >= 0 && ca >= 0) g_parts.push_back({PartKey(t.chr, s, 5), t.chr, s, 5, world(th), world(ca), 0.085f, {}, 0.f});
+                if (ca >= 0 && fo >= 0) g_parts.push_back({PartKey(t.chr, s, 6), t.chr, s, 6, world(ca), world(fo), 0.065f, {}, 0.f});
             }
         }
     }

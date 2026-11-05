@@ -17,4 +17,7 @@ namespace kinetic {
 void HitJudgeFrame(uint8_t* player, double now);
 void HitJudgeReset();
 
+// The enemy weapon's blade axis learned from the blows you took: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z; -1 not yet.
+int HitJudgeWeaponAxis();
+
 }  // namespace kinetic

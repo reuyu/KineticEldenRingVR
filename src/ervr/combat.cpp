@@ -53,6 +53,7 @@
 #include "rtti.h"
 #include "belt.h"
 #include "weapon_wheel.h"
+#include "sword_rig.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -1571,6 +1572,10 @@ void GameFrameBody(uint8_t* player) {
         }
         if (!c.kineticContinuous && !k.first && nowS < s_hitPauseUntil[h]) { anyStrike = true; continue; }   // paused: instance kept, no sweep
         if (h == HandLeft && leftShield) { RestoreAtk(h); continue; }   // the shield blocks, it does not strike
+        // Strike gate (Kinetic): the game's collision hits whatever hurtbox the blade sweeps, so a blade laid on an
+        // enemy's sword or arm would count as a hit. While the simulated blade is at an enemy without having really
+        // struck (cut, stuck, pierced, a hard arm hit), this frame sweeps nothing.
+        if (kinetic::SwordRigHoldStrike(h)) { RestoreAtk(h); anyStrike = true; continue; }
         Template t;
         {
             std::lock_guard<std::mutex> g(g_mtx);

@@ -502,6 +502,8 @@ void Config::Load(const std::wstring& path) {
     physicsBodyStickEnergy = GetF(ini, L"Physics", L"BodyStickEnergy", physicsBodyStickEnergy);
     physicsBodyPierceEnergy = GetF(ini, L"Physics", L"BodyPierceEnergy", physicsBodyPierceEnergy);
     physicsBodyFriction = GetF(ini, L"Physics", L"BodyFriction", physicsBodyFriction);
+    physicsGateStrikes = GetB(ini, L"Physics", L"GateStrikes", physicsGateStrikes);
+    physicsArmHitEnergy = GetF(ini, L"Physics", L"ArmHitEnergy", physicsArmHitEnergy);
     physicsHitJudge = GetB(ini, L"Physics", L"HitJudge", physicsHitJudge);
     physicsHitWindow = GetF(ini, L"Physics", L"HitWindow", physicsHitWindow);
     physicsBodyRadius = GetF(ini, L"Physics", L"BodyRadius", physicsBodyRadius);
@@ -512,6 +514,7 @@ void Config::Load(const std::wstring& path) {
     physicsSwingStamina = GetB(ini, L"Physics", L"SwingStamina", physicsSwingStamina);
     physicsSwingStaminaSpeed = GetF(ini, L"Physics", L"SwingStaminaSpeed", physicsSwingStaminaSpeed);
     physicsSwingStaminaPerSec = GetF(ini, L"Physics", L"SwingStaminaPerSec", physicsSwingStaminaPerSec);
+    physicsSwingRegenDelay = GetF(ini, L"Physics", L"SwingRegenDelay", physicsSwingRegenDelay);
     physicsTiredBelow = GetF(ini, L"Physics", L"TiredBelow", physicsTiredBelow);
     physicsTiredStrength = GetF(ini, L"Physics", L"TiredStrength", physicsTiredStrength);
     cameraYawOffset   = GetI(ini, L"Experimental", L"CameraYawOffset", cameraYawOffset);

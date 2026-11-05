@@ -21,6 +21,8 @@ struct ContactPart {
                            // (the body: the blade cuts through, sticks in or glances off)
     ervr::Vec3 a, b;       // capsule segment, world
     float radius;
+    ervr::Vec3 axis[3];    // kind 2: the weapon bone's local x, y, z in the world (the blade lies along one of them)
+    float length;          // kind 2: EnemyWeaponLength
 };
 
 // Game thread, once per simulation frame from the physics layer: rebuild the capsules from the enemies' current

@@ -821,22 +821,27 @@ struct Config {
     // right-hand weapons within ContactRadius become solid capsules for the simulated blade; each contact's impulse
     // swings that enemy arm about its shoulder (inertia, stiffness = how hard it holds its pose), and it springs back.
     bool  physicsContact = true;
-    float physicsContactRadius = 3.f;          // m
-    float physicsEnemyArmInertia = 0.5f;       // kg*m^2 about the shoulder (arm + weapon)
-    float physicsEnemyArmStiffness = 150.f;    // N*m/rad pulling the arm back into its animation
-    float physicsEnemyArmDamping = 0.8f;       // fraction of critical damping
+    float physicsContactRadius = 4.5f;          // m
+    float physicsEnemyArmInertia = 0.35f;       // kg*m^2 about the shoulder (arm + weapon)
+    float physicsEnemyArmStiffness = 50.f;     // N*m/rad pulling the arm back into its animation
+    float physicsEnemyArmDamping = 0.5f;       // fraction of critical damping
     float physicsEnemyArmMaxDeg = 60.f;        // the swing never exceeds this
     std::string physicsEnemyWeaponBone = "R_Weapon_Sword";   // the bone the right-hand weapon hangs off
-    std::string physicsEnemyWeaponAxis = "x";  // its local axis along the blade (x|y|z, - to flip); unverified
+    std::string physicsEnemyWeaponAxis = "auto"; // its local axis along the blade (x|y|z, - to flip; auto = learned from the hits you take)
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     bool  physicsContactLog = true;
     // The body (torso, head, thighs, calves): a blow's energy at contact (0.5 m v^2 of the blade, x STR/16 scaling)
     // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
     // first): >= BodyPierceEnergy goes in and can be pushed deeper against BodyFriction, and pulled back out.
     bool  physicsBodyContact = true;
-    float physicsBodyCutEnergy = 80.f;        // J
-    float physicsBodyStickEnergy = 25.f;      // J
-    float physicsBodyPierceEnergy = 15.f;     // J
+    float physicsBodyCutEnergy = 300.f;       // J
+    float physicsBodyStickEnergy = 50.f;      // J
+    float physicsBodyPierceEnergy = 40.f;     // J
+    // Strike gate: the game's own attack collision (ERVR's strikes) only counts where the simulated blade really
+    // struck: a body part cut, stuck or pierced, or an arm hit with ArmHitEnergy or more. A blade on an enemy
+    // weapon or arm (a parry, a push), a glance, or a blade at an enemy that has not struck yet deals no damage.
+    bool  physicsGateStrikes = true;
+    float physicsArmHitEnergy = 300.f;        // J
     float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
     // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always
     // holds and costs stamina instead. Damage the game deals with no enemy weapon near you is left alone.
@@ -850,8 +855,9 @@ struct Config {
     // Swing stamina: swinging itself costs stamina (not only a landed hit), and a tired arm is weak - the
     // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
     bool  physicsSwingStamina = true;
-    float physicsSwingStaminaSpeed = 3.5f;     // m/s blade-tip speed above which a swing costs stamina
-    float physicsSwingStaminaPerSec = 25.f;    // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
+    float physicsSwingStaminaSpeed = 5.f;       // m/s blade-tip speed above which a swing costs stamina
+    float physicsSwingStaminaPerSec = 8.f;     // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
+    float physicsSwingRegenDelay = 1.2f;       // s after swing stamina is spent before the game may regenerate it
     float physicsTiredBelow = 0.25f;           // stamina fraction below which the arm weakens
     float physicsTiredStrength = 0.4f;         // arm strength multiplier at 0 stamina
 
