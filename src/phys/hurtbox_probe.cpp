@@ -32,9 +32,9 @@ bool PtrLike(uintptr_t v) { return v >= 0x10000 && v < 0x7FFFFFFFFFFFull && !(v 
 
 std::string NameAt(uintptr_t obj) {
     uintptr_t vt = 0;
-    if (!PtrLike(obj) || !ervr::ProbeRead((void*)obj, &vt, 8) || !InModule(vt)) return {};
+    if (!PtrLike(obj) || !ervr::SafeRead((void*)obj, &vt, 8) || !InModule(vt)) return {};
     uintptr_t col = 0;
-    if (!ervr::ProbeRead((void*)(vt - 8), &col, 8) || !InModule(col)) return {};
+    if (!ervr::SafeRead((void*)(vt - 8), &col, 8) || !InModule(col)) return {};
     return ervr::RttiNameOfVTable((void**)vt);
 }
 
@@ -218,7 +218,7 @@ void DumpFlver(uintptr_t f, const std::string& path, int npc) {
 }
 
 // Breadth-first over the pointers in each object's first 0x400 bytes, depth <= 4, for a FLVER file in memory.
-bool FindFlver(const std::vector<std::pair<uintptr_t, std::string>>& roots, int npc) {
+[[maybe_unused]] bool FindFlver(const std::vector<std::pair<uintptr_t, std::string>>& roots, int npc) {
     std::deque<Node> q;
     std::set<uintptr_t> seen;
     for (auto& r : roots) if (PtrLike(r.first)) { q.push_back({r.first, 0, r.second}); seen.insert(r.first); }
@@ -243,6 +243,57 @@ bool FindFlver(const std::vector<std::pair<uintptr_t, std::string>>& roots, int 
     return false;
 }
 
+// One object: every 8-byte slot of its first 0x200 bytes. Pointers to named objects by name (and walked one level
+// further), (begin, end) pairs as vectors with their first elements both as floats and as int16s, and any vector
+// whose size is a multiple of 0x40 also read as FLVER dummies (pos, refId at 0x1C, parent 0x1E, attach 0x2C).
+// SafeRead only: fast (ProbeRead's VirtualQuery made the last probe stall for seconds).
+void DumpObj(uintptr_t obj, const std::string& path, int npc, int depth) {
+    if (!PtrLike(obj)) return;
+    uintptr_t q[0x40] = {};
+    if (!ervr::SafeRead((void*)obj, q, sizeof(q))) { LOGI("[dmy] %s @%p unreadable", path.c_str(), (void*)obj); return; }
+    LOGI("[dmy] npc %d %s @%p = %s", npc, path.c_str(), (void*)obj, NameAt(obj).c_str());
+    for (int i = 1; i < 0x40; ++i) {
+        const uintptr_t v = q[i];
+        if (!PtrLike(v) || InModule(v)) {
+            // small scalars: show as two ints / two floats
+            if (v && v < 0x10000000000ull) {
+                int32_t a = (int32_t)(v & 0xFFFFFFFF), b = (int32_t)(v >> 32); float fa, fb; std::memcpy(&fa, &a, 4); std::memcpy(&fb, &b, 4);
+                LOGI("[dmy]   %s+0x%x: int %d %d / float %.4g %.4g", path.c_str(), i * 8, a, b, fa, fb);
+            }
+            continue;
+        }
+        const std::string nm = NameAt(v);
+        if (!nm.empty()) {
+            LOGI("[dmy]   %s+0x%x -> %s @%p", path.c_str(), i * 8, nm.c_str(), (void*)v);
+            if (depth < 1) { char p[256]; snprintf(p, sizeof(p), "%s+0x%x", path.c_str(), i * 8); DumpObj(v, p, npc, depth + 1); }
+            continue;
+        }
+        const uintptr_t e = i + 1 < 0x40 ? q[i + 1] : 0;
+        const bool vec = PtrLike(e) && e > v && e - v <= 0x40000;
+        float f[24] = {}; int16_t h[24] = {};
+        ervr::SafeRead((void*)v, f, sizeof(f)); std::memcpy(h, f, sizeof(h));
+        char fb[512]; int o = 0;
+        for (int k = 0; k < 24; ++k) o += snprintf(fb + o, sizeof(fb) - o, "%s%.4g", k ? " " : "", f[k]);
+        char hb[256]; int o2 = 0;
+        for (int k = 0; k < 24; ++k) o2 += snprintf(hb + o2, sizeof(hb) - o2, "%s%d", k ? " " : "", h[k]);
+        LOGI("[dmy]   %s+0x%x -> %s%p (%d bytes): f[%s] h[%s]", path.c_str(), i * 8, vec ? "vector " : "", (void*)v, vec ? (int)(e - v) : -1, fb, hb);
+        if (vec && (e - v) % 0x40 == 0 && (e - v) / 0x40 <= 400) {
+            const int n = (int)((e - v) / 0x40);
+            int shown = 0;
+            for (int k = 0; k < n && shown < 40; ++k) {
+                float d[16];
+                if (!ervr::SafeRead((void*)(v + (uintptr_t)k * 0x40), d, sizeof(d))) break;
+                int16_t ref, par, att;
+                std::memcpy(&ref, (char*)d + 0x1C, 2); std::memcpy(&par, (char*)d + 0x1E, 2); std::memcpy(&att, (char*)d + 0x2C, 2);
+                LOGI("[dmy]     as dummy %d: pos (%.3f %.3f %.3f) fwd (%.2f %.2f %.2f) ref %d parent %d attach %d up (%.2f %.2f %.2f)", k,
+                     d[0], d[1], d[2], d[4], d[5], d[6], ref, par, att, d[8], d[9], d[10]);
+                ++shown;
+            }
+        }
+        if (vec) ++i;   // the end pointer is not an object of its own
+    }
+}
+
 }  // namespace
 
 void DummyProbeFrame() {
@@ -251,20 +302,18 @@ void DummyProbeFrame() {
         if (!t.chr || t.distance > 6.f || g_dmyDone.count(t.npcId) || t.boneCount < 20) continue;
         g_dmyDone.insert(t.npcId);
         uintptr_t mi = 0, res = 0, item = 0;
-        ervr::ProbeRead(t.chr + 0x50, &mi, 8);
-        ervr::ProbeRead(t.chr + 0x28, &res, 8);
-        if (PtrLike(mi)) ervr::ProbeRead((void*)(mi + 0x10), &item, 8);
+        ervr::SafeRead(t.chr + 0x50, &mi, 8);
+        ervr::SafeRead(t.chr + 0x28, &res, 8);
+        if (PtrLike(mi)) ervr::SafeRead((void*)(mi + 0x10), &item, 8);
         LOGI("[dmy] npc %d: model ins %p (%s), model item %p (%s), chr res %p (%s)", t.npcId, (void*)mi, NameAt(mi).c_str(), (void*)item,
              NameAt(item).c_str(), (void*)res, NameAt(res).c_str());
-        std::vector<std::pair<uintptr_t, std::string>> roots = {{item, "item"}, {res, "res"}, {mi, "modelins"}};
         if (PtrLike(item)) {
             uintptr_t fl = 0, dm = 0;
-            ervr::ProbeRead((void*)(item + 0x68), &fl, 8);
-            ervr::ProbeRead((void*)(item + 0x650), &dm, 8);
-            LOGI("[dmy] npc %d: item+0x68 %p (%s), item+0x650 %p (%s)", t.npcId, (void*)fl, NameAt(fl).c_str(), (void*)dm, NameAt(dm).c_str());
-            roots.insert(roots.begin(), {fl, "item+0x68"});
+            ervr::SafeRead((void*)(item + 0x68), &fl, 8);
+            ervr::SafeRead((void*)(item + 0x650), &dm, 8);
+            DumpObj(fl, "flverdata", t.npcId, 0);
+            DumpObj(dm, "dmymod", t.npcId, 0);
         }
-        FindFlver(roots, t.npcId);
         return;   // one per frame
     }
 }
