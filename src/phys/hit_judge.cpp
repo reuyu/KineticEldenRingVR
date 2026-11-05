@@ -159,7 +159,7 @@ void HitJudgeFrame(uint8_t* player, double now) {
     ContactPart parts[128];
     const int n = ContactParts(parts, 128);
     for (int i = 0; i < n; ++i) {
-        if (parts[i].kind != 2) continue;
+        if (parts[i].kind != 2 || parts[i].shield) continue;   // a shield blocks, it does not hit you
         WeaponTrack& w = g_tracks[parts[i].key];
         w.npcId = parts[i].npcId;
         // Where the weapon really is (held off by your blade, its arm turned), not where the animation wants it.

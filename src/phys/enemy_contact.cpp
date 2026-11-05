@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <mutex>
 #include <set>
@@ -57,7 +58,18 @@ struct Shapes {
     std::vector<int> kind, side;  // ContactPart kind/side per capsule, from the bone it follows
 };
 
+// The weapon nodes of an enemy's model (game_shapes GameWeaponNodesRead), re-read every second.
+struct Weapons {
+    uint8_t* chr = nullptr;
+    double at = -10.0;
+    bool ok = false, seen = false;
+    std::string why;
+    std::vector<WeaponNode> nodes;
+};
+
 std::mutex g_mtx;
+std::vector<Weapons> g_weapons;
+std::set<int> g_weaponsLogged;
 std::vector<Shapes> g_shapes;
 std::set<int> g_shapesLogged;
 std::vector<Arm> g_arms;
@@ -97,6 +109,34 @@ Vec3 AxisFrom(const std::string& s) {
     const char c = s.empty() ? 'x' : (char)std::tolower((unsigned char)s[neg ? 1 : 0]);
     Vec3 v = c == 'y' ? Vec3{0, 1, 0} : c == 'z' ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
     return neg ? -v : v;
+}
+
+// The weapon nodes EnemyWeapons names for this model ("4311:R_Weapon_Spear,L_Weapon_Shield;..."); listed = it is there.
+std::vector<std::string> WantedWeapons(const std::string& cfg, int model, bool& listed) {
+    std::vector<std::string> out;
+    listed = false;
+    size_t i = 0;
+    while (i <= cfg.size()) {
+        size_t e = cfg.find(';', i);
+        if (e == std::string::npos) e = cfg.size();
+        const std::string ent = cfg.substr(i, e - i);
+        const size_t colon = ent.find(':');
+        if (colon != std::string::npos && std::atoi(ent.substr(0, colon).c_str()) == model) {
+            listed = true;
+            size_t j = colon + 1;
+            while (j <= ent.size()) {
+                size_t k = ent.find(',', j);
+                if (k == std::string::npos) k = ent.size();
+                std::string nm = ent.substr(j, k - j);
+                while (!nm.empty() && (nm.front() == ' ' || nm.front() == '+')) nm.erase(nm.begin());
+                while (!nm.empty() && nm.back() == ' ') nm.pop_back();
+                if (!nm.empty()) out.push_back(nm);
+                j = k + 1;
+            }
+        }
+        i = e + 1;
+    }
+    return out;
 }
 
 Quat FromRotVec(const Vec3& r) {
@@ -151,7 +191,7 @@ bool ModelPose(uint8_t* chr, uint8_t* hkb, int n, const std::vector<int16_t>& pa
 
 void ContactReset() {
     std::lock_guard<std::mutex> lock(g_mtx);
-    g_arms.clear(); g_torsos.clear(); g_parts.clear(); g_shapes.clear(); g_last = 0;
+    g_arms.clear(); g_torsos.clear(); g_parts.clear(); g_shapes.clear(); g_weapons.clear(); g_last = 0;
 }
 
 int ContactParts(ContactPart* out, int max) {
@@ -185,7 +225,7 @@ void ContactImpulse(uint32_t key, const Vec3& point, const Vec3& impulse) {
     }
 }
 
-void ContactWeaponSim(uint32_t key, const Vec3& grip, const Vec3& tip, float deviation) {
+void ContactWeaponSim(uint32_t key, const Vec3& grip, const Vec3& centre, float deviation) {
     (void)grip;
     std::lock_guard<std::mutex> lock(g_mtx);
     for (const auto& p : g_parts) {
@@ -195,7 +235,7 @@ void ContactWeaponSim(uint32_t key, const Vec3& grip, const Vec3& tip, float dev
         const double now = NowSecLocal();
         // Both hands' scenes may hold the same weapon: within one frame the larger deviation wins.
         if (now - a->simAt < 0.004 && deviation < a->simDev) return;
-        a->simTip = tip; a->simDev = deviation; a->simAt = now;
+        a->simTip = centre; a->simDev = deviation; a->simAt = now;
         return;
     }
 }
@@ -204,7 +244,7 @@ void ContactFrame(uint8_t* player, double now) {
     const auto& c = ervr::Cfg();
     std::lock_guard<std::mutex> lock(g_mtx);
     g_parts.clear();
-    if (!c.physicsContact || !player) { g_arms.clear(); g_torsos.clear(); g_shapes.clear(); return; }
+    if (!c.physicsContact || !player) { g_arms.clear(); g_torsos.clear(); g_shapes.clear(); g_weapons.clear(); return; }
     const float dt = g_last > 0 ? (float)std::min(std::max(now - g_last, 0.0), 0.05) : 0.f;
     g_last = now;
 
@@ -215,6 +255,7 @@ void ContactFrame(uint8_t* player, double now) {
     const bool autoAxis = c.physicsEnemyWeaponAxis.empty() || std::tolower((unsigned char)c.physicsEnemyWeaponAxis[0]) == 'a';
     const Vec3 fixedAxis = AxisFrom(c.physicsEnemyWeaponAxis);
 
+    for (auto& w : g_weapons) w.seen = false;
     for (auto& a : g_arms) a.seen = false;
     for (auto& t : g_torsos) t.seen = false;
     for (auto& sh : g_shapes) sh.seen = false;
@@ -232,7 +273,6 @@ void ContactFrame(uint8_t* player, double now) {
         const int ua[2] = {TrackerBoneIndex(t.hkb, "L_UpperArm"), TrackerBoneIndex(t.hkb, "R_UpperArm")};
         const int fa[2] = {TrackerBoneIndex(t.hkb, "L_Forearm"), TrackerBoneIndex(t.hkb, "R_Forearm")};
         const int hd[2] = {TrackerBoneIndex(t.hkb, "L_Hand"), TrackerBoneIndex(t.hkb, "R_Hand")};
-        const int wb = c.physicsEnemyWeaponBone.empty() ? -1 : TrackerBoneIndex(t.hkb, c.physicsEnemyWeaponBone);
         if (ua[0] < 0 && ua[1] < 0) continue;   // no humanoid arms
         Vec3 rootP; Quat rootQ;
         if (!ervr::GameERChrModelRoot(t.chr, &rootP, &rootQ)) continue;
@@ -302,6 +342,50 @@ void ContactFrame(uint8_t* player, double now) {
                 }
             }
         }
+        // The weapons it holds: the nodes EnemyWeapons names for its model (else EnemyWeaponBone), each with the box
+        // its mesh fills in the model data. One per hand; an L_ node is the left hand's.
+        Weapons* wps = nullptr;
+        for (auto& w : g_weapons) if (w.chr == t.chr) { wps = &w; break; }
+        if (!wps) { g_weapons.push_back(Weapons{}); wps = &g_weapons.back(); wps->chr = t.chr; }
+        wps->seen = true;
+        if (now - wps->at >= 1.0) { wps->at = now; wps->ok = GameWeaponNodesRead(t.chr, wps->nodes, wps->why); }
+        struct Held { int bone = -1; Vec3 lo{}, hi{}; bool shield = false, fromModel = false; std::string name; };
+        Held hands[2];
+        {
+            bool listed = false;
+            const std::vector<std::string> want = WantedWeapons(c.physicsEnemyWeapons, t.npcId, listed);
+            std::vector<std::string> names = want;
+            if (!listed && !c.physicsEnemyWeaponBone.empty()) names.push_back(c.physicsEnemyWeaponBone);
+            std::string missing;
+            for (const std::string& nm : names) {
+                const int s = nm.rfind("L_", 0) == 0 ? 0 : 1;
+                if (hands[s].bone >= 0) continue;
+                const int b = TrackerBoneIndex(t.hkb, nm);
+                const WeaponNode* node = nullptr;
+                if (wps->ok) for (const auto& wn : wps->nodes) if (wn.name == nm) { node = &wn; break; }
+                if (b < 0 || (!node && listed)) { missing += " " + nm + (b < 0 ? " (no such bone)" : " (no mesh in the model data)"); continue; }
+                Held& h = hands[s];
+                h.bone = b; h.name = nm; h.shield = nm.find("Shield") != std::string::npos;
+                if (node) { h.lo = node->min; h.hi = node->max; h.fromModel = true; }
+                else if (c.physicsEnemyWeaponLength > 0.05f) { h.lo = Vec3{0, -0.05f, -0.05f}; h.hi = Vec3{c.physicsEnemyWeaponLength, 0.05f, 0.05f}; }
+                else h.bone = -1;
+            }
+            if (c.physicsContactLog && g_weaponsLogged.insert(t.npcId).second) {
+                std::string all;
+                for (const auto& wn : wps->nodes) {
+                    char e[160];
+                    snprintf(e, sizeof(e), " %s x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f;", wn.name.c_str(), wn.min.x, wn.max.x, wn.min.y, wn.max.y, wn.min.z, wn.max.z);
+                    all += e;
+                }
+                std::string use;
+                for (int s = 0; s < 2; ++s)
+                    if (hands[s].bone >= 0) use += std::string(" ") + (s ? "right " : "left ") + hands[s].name + (hands[s].shield ? " (shield)" : "") +
+                                                  (hands[s].fromModel ? " from its mesh" : " EnemyWeaponLength along EnemyWeaponAxis");
+                LOGI("[phys] weapon nodes npc %d: %s:%s | holds (%s):%s%s%s", t.npcId, wps->why.c_str(), all.c_str(),
+                     listed ? "EnemyWeapons" : "not in EnemyWeapons, EnemyWeaponBone", use.empty() ? " nothing" : use.c_str(),
+                     missing.empty() ? "" : " | left out:", missing.c_str());
+            }
+        }
         Vec3 armS[2]{}; Quat armR[2]{}; bool armOn[2]{};
         for (int s = 0; s < 2; ++s) {
             if (ua[s] < 0 || fa[s] < 0 || hd[s] < 0) continue;
@@ -311,22 +395,26 @@ void ContactFrame(uint8_t* player, double now) {
             const Vec3 S = worldU(ua[s]);
             a->shoulder = S;
             a->axisDir = (worldU(fa[s]) - S).Normalized();
-            // The weapon as the animation wants it.
-            const bool hasWeapon = s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f;
-            Vec3 W0{}, T0{}; Quat wq0{};
+            // The weapon (or shield) in this hand as the animation wants it: its node's frame, its box's centre.
+            const Held& hw = hands[s];
+            const bool hasWeapon = hw.bone >= 0;
+            Vec3 W0{}, C0{}; Quat wq0{};
             if (hasWeapon) {
-                // auto: the direction the hit judge learned for this enemy kind from the blows you took (+x until then)
-                Vec3 weaponAxis = autoAxis ? Vec3{1, 0, 0} : fixedAxis;
-                float ld[3];
-                if (autoAxis && HitJudgeWeaponDir(t.npcId, ld)) weaponAxis = Vec3{ld[0], ld[1], ld[2]};
-                W0 = worldU(wb);
-                wq0 = (TR * rootQ * mq[wb]).Normalized();
-                T0 = W0 + wq0.Rotate(weaponAxis) * c.physicsEnemyWeaponLength;
+                W0 = worldU(hw.bone);
+                wq0 = (TR * rootQ * mq[hw.bone]).Normalized();
+                if (!hw.fromModel) {
+                    // no mesh box: EnemyWeaponLength along EnemyWeaponAxis (auto: learned from the blows you took, +x until then)
+                    Vec3 ax = autoAxis ? Vec3{1, 0, 0} : fixedAxis;
+                    float ld[3];
+                    if (autoAxis && HitJudgeWeaponDir(t.npcId, ld)) ax = Vec3{ld[0], ld[1], ld[2]};
+                    wq0 = (wq0 * Quat::FromTo(Vec3{1, 0, 0}, ax)).Normalized();
+                }
+                C0 = W0 + wq0.Rotate((hw.lo + hw.hi) * 0.5f);
             }
             const bool held = hasWeapon && now - a->simAt < 0.1;
             if (held) {
                 // Your blade holds the weapon off its path: the arm turns about the shoulder to carry it there.
-                const Vec3 u = (T0 - S).Normalized(), v = (a->simTip - S).Normalized();
+                const Vec3 u = (C0 - S).Normalized(), v = (a->simTip - S).Normalized();
                 Quat q = Quat::FromTo(u, v).Normalized();
                 if (q.w < 0.f) q = Quat{-q.x, -q.y, -q.z, -q.w};
                 const float ang = 2.f * std::acos(std::min(q.w, 1.f));
@@ -361,10 +449,16 @@ void ContactFrame(uint8_t* player, double now) {
                 g_parts.push_back(MakePart(PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f));
             }
             if (hasWeapon) {
-                ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.05f);
-                wp.length = c.physicsEnemyWeaponLength;
+                // Its line along the node's x through the box (for the hit judge) and the box itself (for the rig).
+                const float cy = (hw.lo.y + hw.hi.y) * 0.5f, cz = (hw.lo.z + hw.hi.z) * 0.5f;
+                const Vec3 A0 = W0 + wq0.Rotate(Vec3{hw.lo.x, cy, cz}), B0 = W0 + wq0.Rotate(Vec3{hw.hi.x, cy, cz});
+                ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, A0, B0,
+                                          std::max(hw.hi.y - hw.lo.y, hw.hi.z - hw.lo.z) * 0.5f);
+                wp.box = true; wp.shield = hw.shield;
+                wp.boneP = W0; wp.boneQ = wq0; wp.lo = hw.lo; wp.hi = hw.hi;
+                wp.length = hw.hi.x - hw.lo.x;
                 wp.npcId = t.npcId;
-                wp.da = swung(W0); wp.db = held ? a->simTip : swung(T0);
+                wp.da = swung(A0); wp.db = swung(B0);
                 const Quat wq = (R * wq0).Normalized();
                 wp.axis[0] = wq.Rotate(Vec3{1, 0, 0}); wp.axis[1] = wq.Rotate(Vec3{0, 1, 0}); wp.axis[2] = wq.Rotate(Vec3{0, 0, 1});
                 g_parts.push_back(wp);
@@ -516,6 +610,7 @@ void ContactFrame(uint8_t* player, double now) {
     g_torsos.erase(std::remove_if(g_torsos.begin(), g_torsos.end(), [](const Torso& t) { return !t.seen; }), g_torsos.end());
     g_arms.erase(std::remove_if(g_arms.begin(), g_arms.end(), [](const Arm& a) { return !a.seen; }), g_arms.end());
     g_shapes.erase(std::remove_if(g_shapes.begin(), g_shapes.end(), [](const Shapes& s) { return !s.seen; }), g_shapes.end());
+    g_weapons.erase(std::remove_if(g_weapons.begin(), g_weapons.end(), [](const Weapons& w) { return !w.seen; }), g_weapons.end());
 
     if (now - g_logAt >= 5.0) {
         if (c.physicsContactLog && (enemies > 0 || g_hits > 0))

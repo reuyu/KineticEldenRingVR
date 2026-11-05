@@ -829,6 +829,12 @@ struct Config {
     std::string physicsEnemyWeaponBone = "R_Weapon_Sword";   // the bone the right-hand weapon hangs off
     std::string physicsEnemyWeaponAxis = "auto"; // its local axis along the blade (x|y|z, - to flip; auto = learned from the hits you take)
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
+    // Per model (ChrIns+0x64, e.g. 4311): which weapon nodes of its model it holds, "4311:R_Weapon_Spear,L_Weapon_Shield;..."
+    // Their shape is the mesh's box from the model data. A model not listed uses EnemyWeaponBone.
+    std::string physicsEnemyWeapons = "4311:R_Weapon_Spear,L_Weapon_Shield";
+    float physicsEnemyShieldKg = 5.f;          // an enemy shield as a physics body
+    float physicsEnemyShieldForce = 200.f;     // N its arm holds it with
+    float physicsEnemyShieldTorque = 60.f;     // N*m about its grip
     float physicsEnemyWeaponKg = 3.f;          // the enemy weapon as a physics body
     float physicsEnemyArmForce = 200.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
     float physicsEnemyArmTorque = 60.f;        // N*m about its grip

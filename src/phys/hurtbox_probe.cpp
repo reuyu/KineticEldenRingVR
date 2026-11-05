@@ -351,7 +351,10 @@ void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
         const char* sn = ervr::ParamsStructName(pi);
         if (!sn || std::strcmp(sn, "NPC_PARAM_ST") != 0) continue;
         uint32_t sz = 0;
-        uint8_t* row = ervr::ParamsRow(pi, (uint32_t)npc, &sz);
+        int32_t paramId = -1;
+        ervr::SafeRead(chr + 0x60, &paramId, 4);   // ChrIns::npc_param_id (eldenring-rs); +0x64 is the model number
+        uint8_t* row = paramId > 0 ? ervr::ParamsRow(pi, (uint32_t)paramId, &sz) : nullptr;
+        LOGI("[dmy] npc %d: NpcParam id %d", npc, paramId);
         if (row && sz > 0x14E && ervr::SafeRead(row + 0x14A, &mask, 4)) haveMask = true;
         LOGI("[dmy] npc %d: NpcParam (holder %d) row %p size %u, modelDispMask bits 0x%08x%s", npc, pi, (void*)row, sz, mask, haveMask ? "" : " (unread)");
         break;

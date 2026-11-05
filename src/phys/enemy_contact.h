@@ -25,6 +25,12 @@ struct ContactPart {
     ervr::Vec3 axis[3];    // kind 2: the weapon bone's local x, y, z in the world (the blade lies along one of them)
     float length;          // kind 2: EnemyWeaponLength
     int npcId;             // NpcParam row of the enemy (kind 2: whose learned blade direction this is)
+    // kind 2 read from the model (game_shapes GameWeaponNodesRead): a box, the mesh's extent in its node's frame.
+    bool box;
+    bool shield;           // a node named *Shield*: blocks, never damages you
+    ervr::Vec3 boneP;      // the node's origin (the grip) in the world, with the arm's swing applied
+    ervr::Quat boneQ;      // its rotation in the world, with the swing
+    ervr::Vec3 lo, hi;     // the box in that frame (m)
     ervr::Vec3 da, db;     // where the part really is: a/b with the arm's swing applied. For the weapon, a/b is
                            // where the ANIMATION wants it (the physics weapon is driven toward that) and da/db
                            // follows the physics weapon your blade may be holding off.
@@ -40,8 +46,8 @@ int ContactParts(ContactPart* out, int max);
 // A contact's impulse on the enemy part (N*s, world) at a world point. Any thread.
 void ContactImpulse(uint32_t key, const ervr::Vec3& point, const ervr::Vec3& impulse);
 
-// The physics weapon of an enemy (part key) this frame, in the world, while your blade is on it: grip and tip,
-// and how far its tip is off the animation's (m). Its arm is turned to carry it there. Any thread.
+// The physics weapon or shield of an enemy (part key) this frame, in the world, while your blade is on it: its
+// grip and the centre of its box, and how far its far end is off the animation's (m). Its arm is turned to carry it there. Any thread.
 void ContactWeaponSim(uint32_t key, const ervr::Vec3& grip, const ervr::Vec3& tip, float deviation);
 
 void ContactReset();

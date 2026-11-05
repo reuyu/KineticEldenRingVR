@@ -77,6 +77,39 @@ bool Finite(float f) { return std::isfinite(f) && std::fabs(f) < 100.f; }
 
 }  // namespace
 
+bool GameWeaponNodesRead(uint8_t* chr, std::vector<WeaponNode>& out, std::string& why) {
+    out.clear();
+    const uintptr_t mi = chr ? Ptr((uintptr_t)chr + 0x50) : 0;
+    const uintptr_t item = mi ? Ptr(mi + 0x10) : 0;
+    const uintptr_t fl = item ? Ptr(item + 0x68) : 0;
+    if (!Is(fl, "CS::CSFD4FlverModelData")) { why = "no CSFD4FlverModelData at ChrIns+0x50 -> +0x10 -> +0x68"; return false; }
+    int32_t n = 0;
+    ervr::SafeRead((void*)(fl + 0x18), &n, 4);
+    const uintptr_t tab = Ptr(fl + 0x20), names = Ptr(fl + 0x30);
+    if (n < 1 || n > 4000 || !tab || !names) { why = "node table unreadable"; return false; }
+    // names: n NUL-terminated UTF-16 strings one after another
+    std::vector<uint16_t> w(0x8000);
+    size_t got = 0;
+    for (size_t chunk = 0x8000; chunk >= 0x400; chunk /= 2)
+        if (ervr::SafeRead((void*)names, w.data(), chunk * 2)) { got = chunk; break; }
+    if (!got) { why = "node names unreadable"; return false; }
+    size_t k = 0;
+    for (int i = 0; i < n && k < got; ++i) {
+        std::string nm;
+        while (k < got && w[k]) { nm += (char)(w[k] < 128 ? w[k] : '?'); ++k; }
+        ++k;
+        if (nm.find("Weapon") == std::string::npos) continue;
+        float f[8];
+        if (!ervr::SafeRead((void*)(tab + (uintptr_t)i * 0x30), f, sizeof(f))) continue;
+        const Vec3 lo{f[0], f[1], f[2]}, hi{f[4], f[5], f[6]};
+        if (!(lo.x < hi.x && lo.y < hi.y && lo.z < hi.z) || !Finite(lo.x) || !Finite(hi.x) || !Finite(lo.y) || !Finite(hi.y) || !Finite(lo.z) ||
+            !Finite(hi.z)) continue;
+        out.push_back(WeaponNode{nm, lo, hi});
+    }
+    why = std::to_string(out.size()) + " weapon node(s) with a mesh of " + std::to_string(n) + " nodes";
+    return true;
+}
+
 uintptr_t GameShapesSource(uint8_t* chr) {
     uint8_t* ctrl = chr ? ervr::GameERChrCtrl(chr) : nullptr;
     if (!ctrl) return 0;
