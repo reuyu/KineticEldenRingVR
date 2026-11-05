@@ -865,7 +865,7 @@ struct Config {
     // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
     bool  physicsSwingStamina = true;
     float physicsSwingStaminaSpeed = 5.f;       // m/s blade-tip speed above which a swing costs stamina
-    float physicsSwingStaminaPerSec = 8.f;     // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
+    float physicsSwingStaminaPerSec = 5.5f;    // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
     float physicsSwingRegenDelay = 1.2f;       // s after swing stamina is spent before the game may regenerate it
     float physicsTiredBelow = 0.25f;           // stamina fraction below which the arm weakens
     float physicsTiredStrength = 0.4f;         // arm strength multiplier at 0 stamina
