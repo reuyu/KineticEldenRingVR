@@ -623,6 +623,11 @@ void ContactFrame(uint8_t* player, double now) {
             cur.emplace_back(p.key, m);
         }
         g_prevCentre.swap(cur);
+        // each enemy's fastest weapon, onto all its parts
+        for (auto& p : g_parts) {
+            p.weaponSpeed = -1.f;
+            for (const auto& q : g_parts) if (q.chr == p.chr && q.kind == 2) p.weaponSpeed = std::max(p.weaponSpeed, q.worldSpeed);
+        }
     }
 
     if (now - g_logAt >= 5.0) {

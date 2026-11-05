@@ -33,6 +33,8 @@ struct ContactPart {
     ervr::Vec3 lo, hi;     // the box in that frame (m)
     float worldSpeed;      // how fast its centre moved in the world since the last frame (m/s), for the impact log
     ervr::Vec3 worldVel;   // that velocity (m/s, world); zero when not known
+    float weaponSpeed;     // how fast this enemy's own weapons move in the world this frame (m/s; -1 none): a fast one
+                           // means it is attacking - for the impact log
     ervr::Vec3 da, db;     // where the part really is: a/b with the arm's swing applied. For the weapon, a/b is
                            // where the ANIMATION wants it (the physics weapon is driven toward that) and da/db
                            // follows the physics weapon your blade may be holding off.
