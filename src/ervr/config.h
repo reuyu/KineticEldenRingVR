@@ -793,7 +793,7 @@ struct Config {
     // M1 spike (S1): overwrite one bone of the nearest character, to see whether the game draws it and whether
     // its attack hitboxes follow. Empty = off. The bone rotates by TestDeg about its own local TestAxis (x|y|z).
     std::string physicsTestBone;
-    std::string physicsTestAxis = "x";
+    std::string physicsTestAxis = "z";   // x runs along the bone (a twist); z swings it
     float physicsTestDeg = 90.f;
     float physicsTestRadius = 4.f;
     // M2: B&S-style sword (PhysX). The hand+weapon is one rigid body pulled toward the controller by a
