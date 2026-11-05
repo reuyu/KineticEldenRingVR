@@ -127,6 +127,8 @@ bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot);
 // Maps hand h's tracking-frame grip (the frame kinetic::SwordRigStep works in) into the game world:
 // world = origin + rot * (play * scale). From the last arm solve; false if older than 0.1 s.
 bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale);
+// The first-person camera (eye) position last written, world. False before one was written.
+bool GameEREyeWorld(Vec3* out);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

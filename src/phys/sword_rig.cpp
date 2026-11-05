@@ -118,6 +118,8 @@ struct Params {
     float maxAngle;             // rad
     float load;                 // weapon weight torque / wrist torque
     float strFactor;            // STR scaling of a blow's energy (1 at STR 16)
+    bool shield;                // left hand holds a shield: a broad, immovable collider
+    float shieldR;
     PlayPart parts[kMaxParts];  // enemy capsules this frame (tracking frame)
     int nParts;
 };
@@ -146,6 +148,7 @@ struct Rig {
     ContactAcc acc[kMaxParts];
     int contacts = 0;                            // contact pairs reported (for the log)
     PxVec3 lastTip{0.f}; bool haveTip = false;   // swing stamina
+    bool lastShield = false;
     // Body contact: what kind each slot holds, slots the blade passes through (until simTime), the embedded blade.
     int slotKind[kMaxParts]{};
     double ghostUntil[kMaxParts]{};
@@ -236,7 +239,9 @@ void UpdateMass(Rig& r, const Params& p) {
     const float key[4] = {p.weaponKg, p.reach, p.com, p.handKg};
     bool same = true;
     for (int i = 0; i < 4; ++i) same = same && std::fabs(key[i] - r.massKey[i]) <= 0.01f * std::fmax(1.f, std::fabs(key[i]));
+    same = same && r.lastShield == p.shield;
     if (same) return;
+    r.lastShield = p.shield;
     for (int i = 0; i < 4; ++i) r.massKey[i] = key[i];
     const float mw = p.weaponKg, mh = p.handKg, M = std::fmax(mw + mh, 0.1f);
     const float cAlong = mw * p.com / M;                         // total centre of mass along the shaft
@@ -253,7 +258,11 @@ void UpdateMass(Rig& r, const Params& p) {
     if (d < -0.9999f) rot = PxQuat(PxPi, PxVec3(0.f, 1.f, 0.f));
     else if (d < 0.9999f) { const PxVec3 c = x.cross(s); rot = PxQuat(c.x, c.y, c.z, 1.f + d).getNormalized(); }
     // The blade's collision capsule: from just past the hand to the tip.
-    if (r.blade) {
+    if (r.blade && p.shield) {
+        r.blade->setGeometry(PxCapsuleGeometry(std::fmax(p.shieldR, 0.05f), 0.02f));
+        r.blade->setLocalPose(PxTransform(s * 0.08f, rot));
+        r.blade->setFlag(PxShapeFlag::eSIMULATION_SHAPE, true);
+    } else if (r.blade) {
         const float from = 0.08f, len = p.reach - from;
         if (len > 0.1f) {
             r.blade->setGeometry(PxCapsuleGeometry(0.035f, len * 0.5f));
@@ -577,7 +586,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     p.strFactor = std::fmin(std::fmax((float)str / 16.f, 0.5f), 3.f);
     const float tired = TiredFactor();
     g_tiredMin = std::fmin(g_tiredMin, tired);
-    const float k = std::fmax(strength, 0.1f) * tired;
+    p.shield = h == 0 && c.physicsHitJudge && ervr::CombatLeftIsShield();
+    p.shieldR = c.physicsShieldRadius;
+    // A raised shield does not give: the arm behind it is braced (x4), so blows stop on it.
+    const float k = std::fmax(strength, 0.1f) * tired * (p.shield ? 4.f : 1.f);
     p.force = std::fmax(c.physicsSwordForceBase + c.physicsSwordForcePerStr * (float)str, 10.f) * k;
     p.torque = std::fmax(c.physicsSwordTorqueBase + c.physicsSwordTorquePerStr * (float)str, 1.f) * k;
     p.kLin = std::fmax(c.physicsSwordLinearSpring, 0.f); p.dLin = std::fmax(c.physicsSwordLinearDamper, 0.f);

@@ -3133,6 +3133,13 @@ bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot) {
     return true;
 }
 
+bool GameEREyeWorld(Vec3* out) {
+    const Vec3 p = g_lastWrittenPos;
+    if (!out || (p.x == 0.f && p.y == 0.f && p.z == 0.f)) return false;
+    *out = p;
+    return true;
+}
+
 bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale) {
     if (hand != HandLeft && hand != HandRight) return false;
     std::lock_guard<std::mutex> g(g_bladeMtx);

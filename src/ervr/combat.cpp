@@ -2276,6 +2276,20 @@ bool CombatSetPlayerStamina(int value) {
     uint8_t* player = GameERMainPlayer();
     return player && WriteStamina(player, value);
 }
+int CombatPlayerHp(int* maxOut) {
+    uint8_t* player = GameERMainPlayer();
+    return player ? ChrHp(player, maxOut) : -1;
+}
+bool CombatSetPlayerHp(int value) {
+    uint8_t* player = GameERMainPlayer(); if (!player) return false;
+    uint8_t* mods = Deref(player + Chr_Modules); uint8_t* data = mods ? Deref(mods + Mod_Data) : nullptr;
+    if (!data) return false;
+    int maxHp = -1; SafeRead(data + Data_MaxHp, &maxHp, 4);
+    if (maxHp > 0 && value > maxHp) value = maxHp;
+    if (value < 1) value = 1;
+    return SafeWrite(data + Data_Hp, &value, 4);
+}
+bool CombatLeftIsShield() { return g_wep[HandLeft].valid && g_wep[HandLeft].isShield && g_armStyle != 3; }
 float CombatHandReach(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float r = g_wepReach[hand].load();

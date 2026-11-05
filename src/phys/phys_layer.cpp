@@ -4,6 +4,7 @@
 #include "config.h"
 #include "enemy_contact.h"
 #include "game_er.h"
+#include "hit_judge.h"
 #include "game_memory.h"
 #include "log.h"
 #include "pose_override.h"
@@ -55,6 +56,7 @@ void Apply(const char* why) {
     }
     TrackerReset();
     ContactReset();
+    HitJudgeReset();
     PoseOverrideClear();
     g_testChr = nullptr; g_testHkb = nullptr; g_testBone = -1;
 }
@@ -122,6 +124,7 @@ void PhysGameFrame(uint8_t* player, int pass) {
         DeclareTestBone();
         ContactFrame(player, now);
         PoseOverrideEnd();
+        HitJudgeFrame(player, now);
     }
     PoseOverrideWrite(0, nullptr);
     PoseOverrideLog();

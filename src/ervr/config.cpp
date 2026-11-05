@@ -502,6 +502,13 @@ void Config::Load(const std::wstring& path) {
     physicsBodyStickEnergy = GetF(ini, L"Physics", L"BodyStickEnergy", physicsBodyStickEnergy);
     physicsBodyPierceEnergy = GetF(ini, L"Physics", L"BodyPierceEnergy", physicsBodyPierceEnergy);
     physicsBodyFriction = GetF(ini, L"Physics", L"BodyFriction", physicsBodyFriction);
+    physicsHitJudge = GetB(ini, L"Physics", L"HitJudge", physicsHitJudge);
+    physicsHitWindow = GetF(ini, L"Physics", L"HitWindow", physicsHitWindow);
+    physicsBodyRadius = GetF(ini, L"Physics", L"BodyRadius", physicsBodyRadius);
+    physicsShieldRadius = GetF(ini, L"Physics", L"ShieldRadius", physicsShieldRadius);
+    physicsShieldStaminaPerDamage = GetF(ini, L"Physics", L"ShieldStaminaPerDamage", physicsShieldStaminaPerDamage);
+    physicsEnemyWeaponRefSpeed = GetF(ini, L"Physics", L"EnemyWeaponRefSpeed", physicsEnemyWeaponRefSpeed);
+    physicsGrazeMin = GetF(ini, L"Physics", L"GrazeMin", physicsGrazeMin);
     physicsSwingStamina = GetB(ini, L"Physics", L"SwingStamina", physicsSwingStamina);
     physicsSwingStaminaSpeed = GetF(ini, L"Physics", L"SwingStaminaSpeed", physicsSwingStaminaSpeed);
     physicsSwingStaminaPerSec = GetF(ini, L"Physics", L"SwingStaminaPerSec", physicsSwingStaminaPerSec);

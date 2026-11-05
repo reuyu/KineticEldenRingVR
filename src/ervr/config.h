@@ -838,6 +838,15 @@ struct Config {
     float physicsBodyStickEnergy = 25.f;      // J
     float physicsBodyPierceEnergy = 15.f;     // J
     float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
+    // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always
+    // holds and costs stamina instead. Damage the game deals with no enemy weapon near you is left alone.
+    bool  physicsHitJudge = true;
+    float physicsHitWindow = 0.35f;            // s of weapon history a hit is judged on
+    float physicsBodyRadius = 0.22f;           // m, your body capsule (feet to eyes)
+    float physicsShieldRadius = 0.35f;         // m, the shield as a sphere at the left grip
+    float physicsShieldStaminaPerDamage = 1.0f;// stamina a shield block costs per HP of the blow
+    float physicsEnemyWeaponRefSpeed = 6.f;    // m/s: a weapon this fast at contact does full damage
+    float physicsGrazeMin = 0.15f;             // the least damage fraction a touch does
     // Swing stamina: swinging itself costs stamina (not only a landed hit), and a tired arm is weak - the
     // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
     bool  physicsSwingStamina = true;
