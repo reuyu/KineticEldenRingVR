@@ -5,6 +5,7 @@
 #include "enemy_contact.h"
 #include "game_er.h"
 #include "hit_judge.h"
+#include "hurtbox_probe.h"
 #include "game_memory.h"
 #include "log.h"
 #include "pose_override.h"
@@ -126,6 +127,7 @@ void PhysGameFrame(uint8_t* player, int pass) {
         ContactFrame(player, now);
         PoseOverrideEnd();
         HitJudgeFrame(player, now);
+        HurtboxProbeFrame(player);
     }
     PoseOverrideWrite(0, nullptr);
     PoseOverrideLog();

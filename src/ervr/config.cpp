@@ -504,6 +504,7 @@ void Config::Load(const std::wstring& path) {
     physicsTorsoStiffness = GetF(ini, L"Physics", L"TorsoStiffness", physicsTorsoStiffness);
     physicsTorsoDamping = GetF(ini, L"Physics", L"TorsoDamping", physicsTorsoDamping);
     physicsTorsoMaxDeg = GetF(ini, L"Physics", L"TorsoMaxDeg", physicsTorsoMaxDeg);
+    physicsHurtboxProbe = GetB(ini, L"Physics", L"HurtboxProbe", physicsHurtboxProbe);
     physicsContactLog = GetB(ini, L"Physics", L"ContactLog", physicsContactLog);
     physicsBodyContact = GetB(ini, L"Physics", L"BodyContact", physicsBodyContact);
     physicsBodyScale = GetF(ini, L"Physics", L"BodyScale", physicsBodyScale);
