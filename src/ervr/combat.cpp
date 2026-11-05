@@ -2267,6 +2267,15 @@ bool CombatTwoHandGrip(int hand, bool* holding) {
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
 int CombatTwoHandWeaponHand() { const int style = g_armStyleShared.load(); return TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : -1; }
+int CombatPlayerStamina(int* maxOut) {
+    uint8_t* player = GameERMainPlayer();
+    if (!player) return -1;
+    return ReadStamina(player, maxOut);
+}
+bool CombatSetPlayerStamina(int value) {
+    uint8_t* player = GameERMainPlayer();
+    return player && WriteStamina(player, value);
+}
 float CombatHandReach(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float r = g_wepReach[hand].load();

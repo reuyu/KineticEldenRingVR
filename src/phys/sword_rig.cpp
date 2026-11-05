@@ -1,5 +1,6 @@
 #include "sword_rig.h"
 
+#include "combat.h"
 #include "config.h"
 #include "enemy_contact.h"
 #include "game_er.h"
@@ -136,6 +137,7 @@ struct Rig {
     bool slotActive[kMaxParts]{};
     ContactAcc acc[kMaxParts];
     int contacts = 0;                            // contact pairs reported (for the log)
+    PxVec3 lastTip{0.f}; bool haveTip = false;   // swing stamina
 };
 Rig g_rig[2];
 
@@ -385,6 +387,43 @@ bool StepGuarded(Rig* r, const Params* p, PxTransform* out) {
     __except (EXCEPTION_EXECUTE_HANDLER) { g_failed = true; return false; }
 }
 
+// Swing stamina (both hands share the bar): fractional drain carried between frames, the bar as last read, and
+// statistics for the log.
+float g_stamDebt = 0.f;
+int g_stam = -1, g_stamMax = -1;
+double g_stamReadAt = -10;
+float g_stamSpent = 0.f, g_tiredMin = 1.f;
+
+// Arm strength multiplier from how tired the player is (1 = fresh).
+float TiredFactor() {
+    const auto& c = ervr::Cfg();
+    if (!c.physicsSwingStamina) return 1.f;
+    const double now = NowSec();
+    if (now - g_stamReadAt > 0.05) { g_stamReadAt = now; g_stam = ervr::CombatPlayerStamina(&g_stamMax); }
+    if (g_stam < 0 || g_stamMax <= 0) return 1.f;
+    const float frac = (float)g_stam / (float)g_stamMax, below = std::fmax(c.physicsTiredBelow, 0.01f);
+    if (frac >= below) return 1.f;
+    const float lo = std::fmin(std::fmax(c.physicsTiredStrength, 0.05f), 1.f);
+    return lo + (1.f - lo) * std::fmax(frac, 0.f) / below;
+}
+
+// A swing costs stamina while the blade tip moves fast, whether or not it lands.
+void DrainSwing(float tipSpeed, float weaponKg, float dt) {
+    const auto& c = ervr::Cfg();
+    if (!c.physicsSwingStamina || weaponKg <= 0.f || tipSpeed <= c.physicsSwingStaminaSpeed) return;
+    const float v = tipSpeed / 8.f;
+    g_stamDebt += std::fmax(c.physicsSwingStaminaPerSec, 0.f) * v * v * (0.5f + weaponKg / 3.f) * dt;
+    if (g_stamDebt < 1.f) return;
+    const int take = (int)g_stamDebt;
+    g_stamDebt -= (float)take;
+    int maxS = -1;
+    const int cur = ervr::CombatPlayerStamina(&maxS);
+    if (cur <= 0) { g_stamDebt = 0.f; return; }
+    ervr::CombatSetPlayerStamina(cur - take);
+    g_stam = cur - take < 0 ? 0 : cur - take; g_stamMax = maxS;
+    g_stamSpent += (float)take;
+}
+
 int PlayerStrength() {
     static double s_at = -10; static int s_str = 10;
     const double now = NowSec();
@@ -410,7 +449,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (h < 0 || h > 1 || !(dt > 0.f && dt <= 0.1f) || !SwordRigActive()) return false;
     if (!EngineCreate()) return false;
     Rig& r = g_rig[h];
-    if (g_resetMask.load() & (1 << h)) { g_resetMask.fetch_and(~(1 << h)); r.placed = false; }
+    if (g_resetMask.load() & (1 << h)) { g_resetMask.fetch_and(~(1 << h)); r.placed = false; r.haveTip = false; }
 
     const auto& c = ervr::Cfg();
     const int str = PlayerStrength();
@@ -423,7 +462,9 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     p.weaponKg = std::fmin(std::fmax(weight, 0.f) * std::fmax(c.physicsSwordKgPerWeight, 0.f), 60.f);
     p.reach = std::fmin(std::fmax(reach, 0.f), 4.f);
     p.com = std::fmin(std::fmax(com, 0.f), p.reach);
-    const float k = std::fmax(strength, 0.1f);
+    const float tired = TiredFactor();
+    g_tiredMin = std::fmin(g_tiredMin, tired);
+    const float k = std::fmax(strength, 0.1f) * tired;
     p.force = std::fmax(c.physicsSwordForceBase + c.physicsSwordForcePerStr * (float)str, 10.f) * k;
     p.torque = std::fmax(c.physicsSwordTorqueBase + c.physicsSwordTorquePerStr * (float)str, 1.f) * k;
     p.kLin = std::fmax(c.physicsSwordLinearSpring, 0.f); p.dLin = std::fmax(c.physicsSwordLinearDamper, 0.f);
@@ -470,7 +511,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
         if (g_failed) { LOGE("[phys] sword: PhysX step faulted or the rig could not be built; the B&S sword is off until restart (ERVR's own weapon model takes over)"); }
         return false;
     }
-    if (!out.isValid()) { r.placed = false; return false; }
+    if (!out.isValid()) { r.placed = false; r.haveTip = false; return false; }
 
     // Hand the impulses to the enemies they hit, in the world.
     if (mapped) {
@@ -494,10 +535,19 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired)",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts);
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin);
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0;
+        if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
+    }
+
+    // Swing stamina from the simulated blade tip.
+    {
+        const PxVec3 tip = out.p + out.q.rotate(p.shaft) * p.reach;
+        const float v = (tip - r.lastTip).magnitude() / dt;
+        if (r.haveTip && v < 30.f) DrainSwing(v, p.weaponKg, dt);   // faster = a snap or teleport, not a swing
+        r.lastTip = tip; r.haveTip = true;
     }
 
     pos = {out.p.x, out.p.y, out.p.z};

@@ -830,6 +830,13 @@ struct Config {
     std::string physicsEnemyWeaponAxis = "x";  // its local axis along the blade (x|y|z, - to flip); unverified
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     bool  physicsContactLog = true;
+    // Swing stamina: swinging itself costs stamina (not only a landed hit), and a tired arm is weak - the
+    // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
+    bool  physicsSwingStamina = true;
+    float physicsSwingStaminaSpeed = 3.5f;     // m/s blade-tip speed above which a swing costs stamina
+    float physicsSwingStaminaPerSec = 25.f;    // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
+    float physicsTiredBelow = 0.25f;           // stamina fraction below which the arm weakens
+    float physicsTiredStrength = 0.4f;         // arm strength multiplier at 0 stamina
 
     void Load(const std::wstring& iniPath);
 };
