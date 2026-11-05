@@ -487,6 +487,16 @@ void Config::Load(const std::wstring& path) {
     physicsSwordLoadForMax = GetF(ini, L"Physics", L"SwordLoadForMax", physicsSwordLoadForMax);
     physicsSwordSnapDistance = GetF(ini, L"Physics", L"SwordSnapDistance", physicsSwordSnapDistance);
     physicsSwordLog = GetB(ini, L"Physics", L"SwordLog", physicsSwordLog);
+    physicsContact = GetB(ini, L"Physics", L"Contact", physicsContact);
+    physicsContactRadius = GetF(ini, L"Physics", L"ContactRadius", physicsContactRadius);
+    physicsEnemyArmInertia = GetF(ini, L"Physics", L"EnemyArmInertia", physicsEnemyArmInertia);
+    physicsEnemyArmStiffness = GetF(ini, L"Physics", L"EnemyArmStiffness", physicsEnemyArmStiffness);
+    physicsEnemyArmDamping = GetF(ini, L"Physics", L"EnemyArmDamping", physicsEnemyArmDamping);
+    physicsEnemyArmMaxDeg = GetF(ini, L"Physics", L"EnemyArmMaxDeg", physicsEnemyArmMaxDeg);
+    physicsEnemyWeaponBone = GetS(ini, L"Physics", L"EnemyWeaponBone", physicsEnemyWeaponBone);
+    physicsEnemyWeaponAxis = GetS(ini, L"Physics", L"EnemyWeaponAxis", physicsEnemyWeaponAxis);
+    physicsEnemyWeaponLength = GetF(ini, L"Physics", L"EnemyWeaponLength", physicsEnemyWeaponLength);
+    physicsContactLog = GetB(ini, L"Physics", L"ContactLog", physicsContactLog);
     cameraYawOffset   = GetI(ini, L"Experimental", L"CameraYawOffset", cameraYawOffset);
     cameraPitchOffset = GetI(ini, L"Experimental", L"CameraPitchOffset", cameraPitchOffset);
     handAimStrength = GetF(ini, L"Experimental", L"HandAimStrength", handAimStrength);

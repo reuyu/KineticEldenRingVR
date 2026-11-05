@@ -1,6 +1,7 @@
 #include "sword_rig.h"
 
 #include "config.h"
+#include "enemy_contact.h"
 #include "game_er.h"
 #include "log.h"
 #include "phys_layer.h"
@@ -39,8 +40,64 @@ ErrorSink g_errors;
 PxFoundation* g_foundation = nullptr;
 PxPhysics* g_physics = nullptr;
 PxDefaultCpuDispatcher* g_dispatcher = nullptr;
+PxMaterial* g_material = nullptr;
 bool g_failed = false;          // engine creation failed or a step faulted: stay off until restart
 std::atomic<int> g_resetMask{3};
+
+// M2.5: enemy capsules (enemy_contact), converted into this hand's tracking frame.
+constexpr int kMaxParts = 24;
+struct PlayPart { uint32_t key; PxTransform pose; float halfHeight, radius; };
+
+// Contact impulses collected inside simulate(): per pool slot, the impulse on the enemy part and its moment.
+struct ContactAcc { PxVec3 impulse{0.f}; PxVec3 moment{0.f}; float weight = 0.f; };
+
+// Shape filter words: word0 = what the shape is.
+constexpr PxU32 kShapeBlade = 1, kShapeEnemy = 2;
+
+PxFilterFlags ContactFilter(PxFilterObjectAttributes, PxFilterData f0, PxFilterObjectAttributes, PxFilterData f1,
+                            PxPairFlags& pairFlags, const void*, PxU32) {
+    // Only the blade against an enemy part makes contact (enemy parts are kinematic among themselves anyway).
+    if (!((f0.word0 == kShapeBlade && f1.word0 == kShapeEnemy) || (f0.word0 == kShapeEnemy && f1.word0 == kShapeBlade)))
+        return PxFilterFlag::eSUPPRESS;
+    pairFlags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS |
+                PxPairFlag::eNOTIFY_CONTACT_POINTS;
+    return PxFilterFlag::eDEFAULT;
+}
+
+class ContactSink : public PxSimulationEventCallback {
+public:
+    ContactAcc* acc = nullptr;   // the rig being stepped
+    int* hits = nullptr;
+    void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 nb) override {
+        if (!acc) return;
+        for (PxU32 i = 0; i < nb; ++i) {
+            const PxContactPair& cp = pairs[i];
+            if (cp.flags & (PxContactPairFlag::eREMOVED_SHAPE_0 | PxContactPairFlag::eREMOVED_SHAPE_1)) continue;
+            // Which side is the enemy part? Its actor's userData is slot + 1.
+            const int s0 = (int)(size_t)header.actors[0]->userData, s1 = (int)(size_t)header.actors[1]->userData;
+            const int slot = s0 > 0 ? s0 - 1 : s1 > 0 ? s1 - 1 : -1;
+            if (slot < 0 || slot >= kMaxParts) continue;
+            const float sign = s0 > 0 ? 1.f : -1.f;   // the impulse is the one applied to actor 0
+            PxContactPairPoint pts[16];
+            const PxU32 n = cp.extractContacts(pts, 16);
+            for (PxU32 k = 0; k < n; ++k) {
+                const PxVec3 j = pts[k].impulse * sign;
+                const float m = j.magnitude();
+                if (m <= 0.f) continue;
+                acc[slot].impulse += j;
+                acc[slot].moment += pts[k].position * m;
+                acc[slot].weight += m;
+            }
+            if (hits) ++*hits;
+        }
+    }
+    void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
+    void onWake(PxActor**, PxU32) override {}
+    void onSleep(PxActor**, PxU32) override {}
+    void onTrigger(PxTriggerPair*, PxU32) override {}
+    void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) override {}
+};
+ContactSink g_sink;
 
 struct Params {
     PxTransform target;         // the controller this frame
@@ -52,6 +109,8 @@ struct Params {
     float snap;
     float maxAngle;             // rad
     float load;                 // weapon weight torque / wrist torque
+    PlayPart parts[kMaxParts];  // enemy capsules this frame (tracking frame)
+    int nParts;
 };
 
 struct Rig {
@@ -68,6 +127,15 @@ struct Rig {
     float lagSum = 0, lagMax = 0, angSum = 0, angMax = 0; int statN = 0;
     int capHits = 0, subSteps = 0; float twistMax = 0;   // ConstrainOrientation: how often the cap held the blade, largest roll removed (deg)
     float lastMass = 0, lastForce = 0, lastTorque = 0, lastLoad = 0, lastCapDeg = 0;
+    // M2.5
+    PxShape* blade = nullptr;                    // the weapon's collision capsule
+    PxRigidDynamic* enemy[kMaxParts]{};          // kinematic enemy capsules, a fixed pool
+    PxShape* enemyShape[kMaxParts]{};
+    uint32_t slotKey[kMaxParts]{};               // which part a slot holds (0 = free)
+    PxTransform slotFrom[kMaxParts], slotTo[kMaxParts];
+    bool slotActive[kMaxParts]{};
+    ContactAcc acc[kMaxParts];
+    int contacts = 0;                            // contact pairs reported (for the log)
 };
 Rig g_rig[2];
 
@@ -90,6 +158,8 @@ bool EngineCreate() {
     // 0 worker threads: every simulate() runs inline on the calling (game) thread.
     g_dispatcher = PxDefaultCpuDispatcherCreate(0);
     if (!g_dispatcher) { g_failed = true; LOGE("[phys] sword: no CPU dispatcher"); return false; }
+    g_material = g_physics->createMaterial(0.4f, 0.3f, 0.05f);
+    if (!g_material) { g_failed = true; LOGE("[phys] sword: no material"); return false; }
     LOGI("[phys] sword: PhysX %d.%d.%d ready (CPU, inline)", PX_PHYSICS_VERSION_MAJOR, PX_PHYSICS_VERSION_MINOR, PX_PHYSICS_VERSION_BUGFIX);
     return true;
 }
@@ -99,7 +169,8 @@ bool RigCreate(Rig& r) {
     PxSceneDesc desc(g_physics->getTolerancesScale());
     desc.gravity = PxVec3(0.f, -9.81f, 0.f);    // ERVR's game frame is Y-up
     desc.cpuDispatcher = g_dispatcher;
-    desc.filterShader = PxDefaultSimulationFilterShader;
+    desc.filterShader = ContactFilter;
+    desc.simulationEventCallback = &g_sink;
     r.scene = g_physics->createScene(desc);
     if (!r.scene) return false;
     r.anchor = g_physics->createRigidDynamic(PxTransform(PxIdentity));
@@ -110,6 +181,26 @@ bool RigCreate(Rig& r) {
     r.body->setLinearDamping(0.05f);
     r.body->setAngularDamping(0.05f);
     r.body->setMaxAngularVelocity(60.f);
+    // A blade that starts inside an enemy part is eased out, not shot out.
+    r.body->setMaxDepenetrationVelocity(3.f);
+    r.blade = PxRigidActorExt::createExclusiveShape(*r.body, PxCapsuleGeometry(0.035f, 0.1f), *g_material);
+    if (!r.blade) return false;
+    r.blade->setSimulationFilterData(PxFilterData(kShapeBlade, 0, 0, 0));
+    r.blade->setContactOffset(0.02f); r.blade->setRestOffset(0.f);
+    r.blade->setFlag(PxShapeFlag::eSIMULATION_SHAPE, false);   // until a weapon with reach is held
+    for (int i = 0; i < kMaxParts; ++i) {
+        PxRigidDynamic* a = g_physics->createRigidDynamic(PxTransform(PxVec3(0.f, -1000.f - 10.f * i, 0.f)));
+        if (!a) return false;
+        a->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true);
+        a->userData = (void*)(size_t)(i + 1);
+        PxShape* s = PxRigidActorExt::createExclusiveShape(*a, PxCapsuleGeometry(0.05f, 0.1f), *g_material);
+        if (!s) return false;
+        s->setSimulationFilterData(PxFilterData(kShapeEnemy, 0, 0, 0));
+        s->setContactOffset(0.02f); s->setRestOffset(0.f);
+        r.enemy[i] = a; r.enemyShape[i] = s;
+        r.slotFrom[i] = a->getGlobalPose(); r.slotTo[i] = r.slotFrom[i];
+        r.scene->addActor(*a);
+    }
     r.scene->addActor(*r.anchor);
     r.scene->addActor(*r.body);
     r.joint = PxD6JointCreate(*g_physics, r.anchor, PxTransform(PxIdentity), r.body, PxTransform(PxIdentity));
@@ -144,6 +235,17 @@ void UpdateMass(Rig& r, const Params& p) {
     const float d = x.dot(s);
     if (d < -0.9999f) rot = PxQuat(PxPi, PxVec3(0.f, 1.f, 0.f));
     else if (d < 0.9999f) { const PxVec3 c = x.cross(s); rot = PxQuat(c.x, c.y, c.z, 1.f + d).getNormalized(); }
+    // The blade's collision capsule: from just past the hand to the tip.
+    if (r.blade) {
+        const float from = 0.08f, len = p.reach - from;
+        if (len > 0.1f) {
+            r.blade->setGeometry(PxCapsuleGeometry(0.035f, len * 0.5f));
+            r.blade->setLocalPose(PxTransform(s * (from + len * 0.5f), rot));
+            r.blade->setFlag(PxShapeFlag::eSIMULATION_SHAPE, true);
+        } else {
+            r.blade->setFlag(PxShapeFlag::eSIMULATION_SHAPE, false);
+        }
+    }
     r.body->setMass(M);
     r.body->setCMassLocalPose(PxTransform(s * cAlong, rot));
     r.body->setMassSpaceInertiaTensor(PxVec3(axial, perp, perp));
@@ -208,6 +310,39 @@ void ConstrainOrientation(Rig& r, const Params& p, const PxTransform& anchor) {
     r.body->setAngularVelocity(wa + wr);
 }
 
+// Assign this frame's enemy parts to pool slots (a part keeps its slot while it exists, so its motion is continuous),
+// resize their capsules, and park the free slots far away.
+void SyncEnemies(Rig& r, const Params& p) {
+    bool used[kMaxParts] = {};
+    int slotOf[kMaxParts];
+    for (int i = 0; i < p.nParts; ++i) {
+        slotOf[i] = -1;
+        for (int k = 0; k < kMaxParts; ++k) if (r.slotActive[k] && r.slotKey[k] == p.parts[i].key) { slotOf[i] = k; break; }
+        if (slotOf[i] >= 0) used[slotOf[i]] = true;
+    }
+    for (int i = 0; i < p.nParts; ++i) {
+        if (slotOf[i] < 0) for (int k = 0; k < kMaxParts; ++k) if (!used[k] && !r.slotActive[k]) { slotOf[i] = k; used[k] = true; break; }
+        if (slotOf[i] < 0) for (int k = 0; k < kMaxParts; ++k) if (!used[k]) { slotOf[i] = k; used[k] = true; r.slotActive[k] = false; break; }
+        const int k = slotOf[i];
+        if (k < 0) continue;
+        const PlayPart& pp = p.parts[i];
+        r.enemyShape[k]->setGeometry(PxCapsuleGeometry(pp.radius, pp.halfHeight > 0.001f ? pp.halfHeight : 0.001f));
+        if (!r.slotActive[k]) {
+            // New part: put it there outright (no sweep from the parking spot).
+            r.enemy[k]->setGlobalPose(pp.pose);
+            r.slotFrom[k] = pp.pose;
+        } else {
+            r.slotFrom[k] = r.slotTo[k];
+        }
+        r.slotTo[k] = pp.pose; r.slotKey[k] = pp.key; r.slotActive[k] = true;
+    }
+    for (int k = 0; k < kMaxParts; ++k) {
+        if (used[k] || !r.slotActive[k]) continue;
+        r.slotActive[k] = false; r.slotKey[k] = 0;
+        r.enemy[k]->setGlobalPose(PxTransform(PxVec3(0.f, -1000.f - 10.f * k, 0.f)));
+    }
+}
+
 // The simulation proper. No C++ objects with destructors: called inside an SEH guard.
 bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     Rig& r = *rp; const Params& p = *pp;
@@ -218,6 +353,9 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     // Move the controller anchor smoothly across sub-steps (<= 1/240 s each) so stiff drives stay stable.
     const int n = (int)std::ceil(p.dt * 240.f) < 1 ? 1 : (int)std::ceil(p.dt * 240.f) > 8 ? 8 : (int)std::ceil(p.dt * 240.f);
     const float h = p.dt / (float)n;
+    SyncEnemies(r, p);
+    for (int i = 0; i < kMaxParts; ++i) r.acc[i] = ContactAcc{};
+    g_sink.acc = r.acc; g_sink.hits = &r.contacts;
     const PxTransform from = r.lastTarget;
     PxQuat qTo = p.target.q;
     if (from.q.dot(qTo) < 0.f) qTo = -qTo;
@@ -226,10 +364,17 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
         const PxVec3 pos = from.p * (1.f - t) + p.target.p * t;
         const PxQuat rot = (from.q * (1.f - t) + qTo * t).getNormalized();
         r.anchor->setKinematicTarget(PxTransform(pos, rot));
+        for (int k = 0; k < kMaxParts; ++k) {
+            if (!r.slotActive[k]) continue;
+            PxQuat a = r.slotFrom[k].q, b = r.slotTo[k].q;
+            if (a.dot(b) < 0.f) b = -b;
+            r.enemy[k]->setKinematicTarget(PxTransform(r.slotFrom[k].p * (1.f - t) + r.slotTo[k].p * t, (a * (1.f - t) + b * t).getNormalized()));
+        }
         r.scene->simulate(h);
         r.scene->fetchResults(true);
         ConstrainOrientation(r, p, PxTransform(pos, rot));
     }
+    g_sink.acc = nullptr; g_sink.hits = nullptr;
     r.lastTarget = p.target;
     *out = r.body->getGlobalPose();
     return true;
@@ -293,12 +438,51 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
         p.maxAngle = (lo + (hi - lo) * t) * 0.0174533f;
     }
 
+    // M2.5: the enemy parts, from the world into this hand's tracking frame (play = rot^-1 (world - origin) / scale).
+    ervr::Vec3 origin; ervr::Quat w2p; float scale = 1.f;
+    const bool mapped = c.physicsContact && ervr::GameERPlayToWorld(h, &origin, &w2p, &scale) && scale > 0.05f;
+    p.nParts = 0;
+    if (mapped) {
+        ContactPart parts[kMaxParts];
+        const int n = ContactParts(parts, kMaxParts);
+        const ervr::Quat inv = w2p.Conj();
+        for (int i = 0; i < n; ++i) {
+            const ervr::Vec3 a = inv.Rotate(parts[i].a - origin) * (1.f / scale);
+            const ervr::Vec3 b = inv.Rotate(parts[i].b - origin) * (1.f / scale);
+            const ervr::Vec3 d = b - a;
+            const float len = d.Length();
+            if (len < 1e-3f) continue;
+            PlayPart& pp = p.parts[p.nParts++];
+            pp.key = parts[i].key;
+            pp.halfHeight = len * 0.5f;
+            pp.radius = parts[i].radius / scale;
+            const PxVec3 x(1.f, 0.f, 0.f), dir = ToPx(d * (1.f / len));
+            const float dt2 = x.dot(dir);
+            PxQuat rot(PxIdentity);
+            if (dt2 < -0.9999f) rot = PxQuat(PxPi, PxVec3(0.f, 1.f, 0.f));
+            else if (dt2 < 0.9999f) { const PxVec3 cr = x.cross(dir); rot = PxQuat(cr.x, cr.y, cr.z, 1.f + dt2).getNormalized(); }
+            pp.pose = PxTransform(ToPx((a + b) * 0.5f), rot);
+        }
+    }
+
     PxTransform out(PxIdentity);
     if (!StepGuarded(&r, &p, &out)) {
         if (g_failed) { LOGE("[phys] sword: PhysX step faulted or the rig could not be built; the B&S sword is off until restart (ERVR's own weapon model takes over)"); }
         return false;
     }
     if (!out.isValid()) { r.placed = false; return false; }
+
+    // Hand the impulses to the enemies they hit, in the world.
+    if (mapped) {
+        for (int k = 0; k < kMaxParts; ++k) {
+            const ContactAcc& a = r.acc[k];
+            if (!r.slotActive[k] || a.weight <= 0.f) continue;
+            const PxVec3 pt = a.moment * (1.f / a.weight);
+            const ervr::Vec3 pw = origin + w2p.Rotate(ervr::Vec3{pt.x, pt.y, pt.z} * scale);
+            const ervr::Vec3 jw = w2p.Rotate(ervr::Vec3{a.impulse.x, a.impulse.y, a.impulse.z});
+            ContactImpulse(r.slotKey[k], pw, jw);
+        }
+    }
 
     // Statistics: how far the simulated grip trails the real hand.
     const float lag = (out.p - p.target.p).magnitude();
@@ -310,10 +494,10 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax);
-        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0;
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts);
+        r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0;
     }
 
     pos = {out.p.x, out.p.y, out.p.z};

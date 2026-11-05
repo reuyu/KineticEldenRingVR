@@ -817,6 +817,19 @@ struct Config {
     float physicsSwordLoadForMax = 0.6f;
     float physicsSwordSnapDistance = 0.6f;    // m: further than this from the controller, the grip snaps back
     bool  physicsSwordLog = true;             // lag summary every 5 s
+    // M2.5: the blade against enemy arms and weapons (src/phys/enemy_contact.*). Enemy upper arms, forearms and
+    // right-hand weapons within ContactRadius become solid capsules for the simulated blade; each contact's impulse
+    // swings that enemy arm about its shoulder (inertia, stiffness = how hard it holds its pose), and it springs back.
+    bool  physicsContact = true;
+    float physicsContactRadius = 3.f;          // m
+    float physicsEnemyArmInertia = 0.5f;       // kg*m^2 about the shoulder (arm + weapon)
+    float physicsEnemyArmStiffness = 150.f;    // N*m/rad pulling the arm back into its animation
+    float physicsEnemyArmDamping = 0.8f;       // fraction of critical damping
+    float physicsEnemyArmMaxDeg = 60.f;        // the swing never exceeds this
+    std::string physicsEnemyWeaponBone = "R_Weapon_Sword";   // the bone the right-hand weapon hangs off
+    std::string physicsEnemyWeaponAxis = "x";  // its local axis along the blade (x|y|z, - to flip); unverified
+    float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
+    bool  physicsContactLog = true;
 
     void Load(const std::wstring& iniPath);
 };

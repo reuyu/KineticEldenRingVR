@@ -23,5 +23,7 @@ void TrackerReset();
 
 // Index of a bone by name in a character's skeleton (cached per hkbCharacter), -1 if absent.
 int TrackerBoneIndex(uint8_t* hkb, const std::string& name);
+// Parent index per bone (-1 for roots), null if the skeleton is unreadable.
+const std::vector<int16_t>* TrackerBoneParents(uint8_t* hkb);
 
 }  // namespace kinetic

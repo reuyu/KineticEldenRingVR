@@ -122,6 +122,11 @@ uint8_t* GameERChrHkbCharacter(uint8_t* chr);
 bool GameERHkbSkeleton(uint8_t* hkb, std::vector<std::string>& names, std::vector<int16_t>& parents);
 // The live, parent-relative pose buffer: boneCount x hkQsTransform {t[4], q[4] xyzw, s[4]}. Null if unreadable.
 float* GameERHkbLivePose(uint8_t* hkb);
+// A character's ChrCtrl model matrix as position + rotation: the transform the renderer hangs its skeleton off.
+bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot);
+// Maps hand h's tracking-frame grip (the frame kinetic::SwordRigStep works in) into the game world:
+// world = origin + rot * (play * scale). From the last arm solve; false if older than 0.1 s.
+bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

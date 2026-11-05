@@ -1,0 +1,198 @@
+#include "enemy_contact.h"
+
+#include "chr_tracker.h"
+#include "config.h"
+#include "game_er.h"
+#include "game_memory.h"
+#include "log.h"
+#include "pose_override.h"
+
+#include <algorithm>
+#include <cmath>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace kinetic {
+
+namespace {
+
+using ervr::Quat;
+using ervr::Vec3;
+
+// One enemy arm's swing away from its animation: a rotation vector about the shoulder (world) and its rate.
+struct Arm {
+    uint8_t* chr = nullptr;
+    int side = 0;
+    int npcId = 0;
+    Vec3 theta{}, omega{};
+    Vec3 shoulder{};          // last frame's shoulder, for impulses that arrive before the next one
+    Vec3 angImpulse{};        // accumulated since the last frame (N*m*s)
+    bool seen = false;
+};
+
+std::mutex g_mtx;
+std::vector<Arm> g_arms;
+std::vector<ContactPart> g_parts;
+double g_last = 0;
+// statistics for the 5 s log
+double g_logAt = 0;
+int g_hits = 0;
+float g_maxImpulse = 0, g_maxSwingDeg = 0;
+int g_maxSwingNpc = 0, g_maxSwingSide = 0;
+
+uint32_t PartKey(uint8_t* chr, int side, int kind) {
+    const uint64_t a = (uint64_t)(uintptr_t)chr;
+    return (uint32_t)(((a >> 4) ^ (a >> 32)) * 8u) + (uint32_t)(side * 4 + kind);
+}
+
+Vec3 AxisFrom(const std::string& s) {
+    const bool neg = !s.empty() && s[0] == '-';
+    const char c = s.empty() ? 'x' : (char)std::tolower((unsigned char)s[neg ? 1 : 0]);
+    Vec3 v = c == 'y' ? Vec3{0, 1, 0} : c == 'z' ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+    return neg ? -v : v;
+}
+
+Quat FromRotVec(const Vec3& r) {
+    const float a = r.Length();
+    if (a < 1e-6f) return Quat{};
+    return Quat::AxisAngle(r * (1.f / a), a);
+}
+
+Arm* FindArm(uint8_t* chr, int side) {
+    for (auto& a : g_arms) if (a.chr == chr && a.side == side) return &a;
+    return nullptr;
+}
+
+// Model-space rotation and position of every bone, from the animation's local pose (our own overrides taken out).
+bool ModelPose(uint8_t* chr, uint8_t* hkb, int n, const std::vector<int16_t>& par, std::vector<Quat>& mq, std::vector<Vec3>& mp) {
+    float* pose = ervr::GameERHkbLivePose(hkb);
+    if (!pose || n <= 0 || n > 1024 || (int)par.size() != n) return false;
+    std::vector<float> loc((size_t)n * 12);
+    if (!ervr::SafeRead(pose, loc.data(), loc.size() * sizeof(float))) return false;
+    mq.resize(n); mp.resize(n);
+    for (int i = 0; i < n; ++i) {
+        float* l = &loc[(size_t)i * 12];
+        float anim[4];
+        if (PoseOverrideAnimQ(chr, pose, i, anim)) for (int k = 0; k < 4; ++k) l[4 + k] = anim[k];
+        const Quat q = Quat{l[4], l[5], l[6], l[7]}.Normalized();
+        const Vec3 t{l[0], l[1], l[2]};
+        const int p = par[i];
+        if (p < 0 || p >= i) { mq[i] = q; mp[i] = t; }
+        else { mq[i] = (mq[p] * q).Normalized(); mp[i] = mp[p] + mq[p].Rotate(t); }
+    }
+    return true;
+}
+
+}  // namespace
+
+void ContactReset() {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_arms.clear(); g_parts.clear(); g_last = 0;
+}
+
+int ContactParts(ContactPart* out, int max) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    const int n = std::min((int)g_parts.size(), max);
+    for (int i = 0; i < n; ++i) out[i] = g_parts[i];
+    return n;
+}
+
+void ContactImpulse(uint32_t key, const Vec3& point, const Vec3& impulse) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    for (const auto& p : g_parts) {
+        if (p.key != key) continue;
+        Arm* a = FindArm(p.chr, p.side);
+        if (!a) return;
+        a->angImpulse = a->angImpulse + (point - a->shoulder).Cross(impulse);
+        ++g_hits;
+        g_maxImpulse = std::max(g_maxImpulse, impulse.Length());
+        return;
+    }
+}
+
+void ContactFrame(uint8_t* player, double now) {
+    const auto& c = ervr::Cfg();
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_parts.clear();
+    if (!c.physicsContact || !player) { g_arms.clear(); return; }
+    const float dt = g_last > 0 ? (float)std::min(std::max(now - g_last, 0.0), 0.05) : 0.f;
+    g_last = now;
+
+    const float inertia = std::max(c.physicsEnemyArmInertia, 0.02f);
+    const float k = std::max(c.physicsEnemyArmStiffness, 0.f);
+    const float damp = 2.f * std::max(c.physicsEnemyArmDamping, 0.f) * std::sqrt(k * inertia);
+    const float maxRad = std::min(std::max(c.physicsEnemyArmMaxDeg, 0.f), 150.f) * 0.0174533f;
+    const Vec3 weaponAxis = AxisFrom(c.physicsEnemyWeaponAxis);
+
+    for (auto& a : g_arms) a.seen = false;
+    std::vector<Quat> mq; std::vector<Vec3> mp;
+    int enemies = 0;
+    for (const TrackedChr& t : TrackerList()) {
+        if (!t.hkb || t.distance > c.physicsContactRadius || t.hp == 0) continue;
+        if (enemies >= 4) break;
+        const auto* par = TrackerBoneParents(t.hkb);
+        if (!par) continue;
+        const int ua[2] = {TrackerBoneIndex(t.hkb, "L_UpperArm"), TrackerBoneIndex(t.hkb, "R_UpperArm")};
+        const int fa[2] = {TrackerBoneIndex(t.hkb, "L_Forearm"), TrackerBoneIndex(t.hkb, "R_Forearm")};
+        const int hd[2] = {TrackerBoneIndex(t.hkb, "L_Hand"), TrackerBoneIndex(t.hkb, "R_Hand")};
+        const int wb = c.physicsEnemyWeaponBone.empty() ? -1 : TrackerBoneIndex(t.hkb, c.physicsEnemyWeaponBone);
+        if (ua[0] < 0 && ua[1] < 0) continue;   // no humanoid arms
+        Vec3 rootP; Quat rootQ;
+        if (!ervr::GameERChrModelRoot(t.chr, &rootP, &rootQ)) continue;
+        if (!ModelPose(t.chr, t.hkb, (int)par->size(), *par, mq, mp)) continue;
+        ++enemies;
+        auto world = [&](int b) { return rootP + rootQ.Rotate(mp[b]); };
+        for (int s = 0; s < 2; ++s) {
+            if (ua[s] < 0 || fa[s] < 0 || hd[s] < 0) continue;
+            Arm* a = FindArm(t.chr, s);
+            if (!a) { g_arms.push_back(Arm{}); a = &g_arms.back(); a->chr = t.chr; a->side = s; }
+            a->seen = true; a->npcId = t.npcId;
+            const Vec3 S = world(ua[s]);
+            a->shoulder = S;
+            // Swing: the impulses of the last frame, then a damped spring back into the animation.
+            if (dt > 0.f) {
+                a->omega = a->omega + a->angImpulse * (1.f / inertia);
+                a->omega = a->omega + (a->theta * -k - a->omega * damp) * (dt / inertia);
+                a->theta = a->theta + a->omega * dt;
+                const float ang = a->theta.Length();
+                if (ang > maxRad && ang > 1e-6f) {
+                    const Vec3 dir = a->theta * (1.f / ang);
+                    a->theta = dir * maxRad;
+                    const float out = a->omega.Dot(dir);
+                    if (out > 0.f) a->omega = a->omega - dir * out;
+                }
+            }
+            a->angImpulse = Vec3{};
+            const float swingDeg = a->theta.Length() * 57.2958f;
+            if (swingDeg > g_maxSwingDeg) { g_maxSwingDeg = swingDeg; g_maxSwingNpc = t.npcId; g_maxSwingSide = s; }
+            const Quat R = FromRotVec(a->theta);
+            auto swung = [&](const Vec3& p) { return S + R.Rotate(p - S); };
+            const Vec3 E = swung(world(fa[s])), H = swung(world(hd[s]));
+            g_parts.push_back({PartKey(t.chr, s, 0), t.chr, s, 0, S, E, 0.07f});
+            g_parts.push_back({PartKey(t.chr, s, 1), t.chr, s, 1, E, H, 0.055f});
+            if (s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f) {
+                const Vec3 W = swung(world(wb));
+                const Vec3 dir = R.Rotate(rootQ.Rotate(mq[wb].Rotate(weaponAxis)));
+                g_parts.push_back({PartKey(t.chr, s, 2), t.chr, s, 2, W, W + dir * c.physicsEnemyWeaponLength, 0.035f});
+            }
+            // Draw the swing: rotate the upper arm in model space about its own origin (the shoulder).
+            if (a->theta.Length() > 0.0035f) {
+                const int p = (*par)[ua[s]];
+                const Quat Mp = p >= 0 ? mq[p] : Quat{};
+                const Quat Rm = (rootQ.Conj() * R * rootQ).Normalized();
+                PoseOverrideAdd(t.chr, t.hkb, ua[s], (Mp.Conj() * Rm * Mp).Normalized(), Quat{});
+            }
+        }
+    }
+    g_arms.erase(std::remove_if(g_arms.begin(), g_arms.end(), [](const Arm& a) { return !a.seen; }), g_arms.end());
+
+    if (now - g_logAt >= 5.0) {
+        if (c.physicsContactLog && (enemies > 0 || g_hits > 0))
+            LOGI("[phys] contact: %d enemy(ies), %d capsule(s); blade contacts %d (largest impulse %.1f N*s); largest arm swing %.0f deg (npc %d %s arm)",
+                 enemies, (int)g_parts.size(), g_hits, g_maxImpulse, g_maxSwingDeg, g_maxSwingNpc, g_maxSwingSide ? "right" : "left");
+        g_logAt = now; g_hits = 0; g_maxImpulse = 0; g_maxSwingDeg = 0;
+    }
+}
+
+}  // namespace kinetic

@@ -94,6 +94,11 @@ int TrackerBoneIndex(uint8_t* hkb, const std::string& name) {
     return it == r->index.end() ? -1 : it->second;
 }
 
+const std::vector<int16_t>* TrackerBoneParents(uint8_t* hkb) {
+    const RigInfo* r = Rig(hkb);
+    return r ? &r->parents : nullptr;
+}
+
 void TrackerUpdate(uint8_t* player, float radius) {
     g_list.clear();
     if (!player) return;

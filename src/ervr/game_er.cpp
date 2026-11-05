@@ -674,6 +674,9 @@ bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.
 struct BladeSample { bool valid = false; Vec3 grip{}, tip{}; double stamp = 0; };
 std::mutex g_bladeMtx;
 BladeSample g_blade[2];
+// Kinetic: tracking frame -> world for each hand's simulated grip (GameERPlayToWorld), under g_bladeMtx.
+struct PlayToWorld { bool valid = false; Vec3 origin{}; Quat rot{}; float scale = 1.f; double stamp = 0; };
+PlayToWorld g_playToWorld[2];
 BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
@@ -2373,6 +2376,12 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             if (!tok[h]) continue;
             const Vec3 axis = c.twoHandAxis != "forward" ? tcu[h] : tcf[h];
             g_blade[h].grip = tp[h]; g_blade[h].tip = tp[h] + axis * CombatHandReach(h); g_blade[h].stamp = NowSec();
+            // tp = anchor + baseQ * (handP * scale) + offsets, and handP is the simulated grip plus a constant:
+            // whatever is left over is the origin of the grip frame in the world.
+            Vec3 grip; { std::lock_guard<std::mutex> li(g_inertiaMtx); grip = g_inertia[h].pos; }
+            PlayToWorld& m = g_playToWorld[h];
+            m.rot = baseQ; m.scale = c.handScale; m.origin = tp[h] - baseQ.Rotate(grip * c.handScale);
+            m.valid = g_inertia[h].init; m.stamp = g_blade[h].stamp;
         }
     }
     // Publish the entire solved root in the native model frame. Mixing a render-frame
@@ -2853,17 +2862,18 @@ uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
     __try { RewriteIfClobbered(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     return rv;
 }
-void KineticModelPosGuarded(void* ctrl);
+void KineticModelPosGuarded(void* ctrl, bool post);
 void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     CountPass(g_cntModelPos);
     // Kinetic: enemy bone overrides go in here, before the renderer consumes this character's pose.
-    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl);
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl, false);
     // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
     // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
     // The upper-body layer ran just before us; put ours back first, then let the original consume it.
     bool act = !g_tripped && FirstPersonActive() && (Cfg().handTracking || g_moveRiding.load());
     if (act) { __try { UpdateChrModelPosBody(ctrl, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; act = false; } }
     g_origUpdModelPos(ctrl);
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl, true);
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
 }
 void HookCameraStepImpl(void* a, void* b);
@@ -3003,8 +3013,8 @@ void KineticFrameGuarded(uint8_t* player, int pass) {
     __try { kinetic::PhysGameFrame(player, pass); }
     __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
 }
-void KineticModelPosGuarded(void* ctrl) {
-    __try { kinetic::PhysBeforeModelPos(ctrl); }
+void KineticModelPosGuarded(void* ctrl, bool post) {
+    __try { if (post) kinetic::PhysAfterModelPos(ctrl); else kinetic::PhysBeforeModelPos(ctrl); }
     __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
 }
 void HkHandler(MidHookRegs*, void*) {
@@ -3115,6 +3125,22 @@ uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
 uint8_t* GameERMainPlayer() { return MainPlayer(); }
 
 bool GameERRiding() { return g_moveActive.load() && g_moveRiding.load(); }
+
+bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot) {
+    Vec3 p; Quat q;
+    if (!chr || !pos || !rot || !ModelMatrixRoot(chr, p, q)) return false;
+    *pos = p; *rot = q;
+    return true;
+}
+
+bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale) {
+    if (hand != HandLeft && hand != HandRight) return false;
+    std::lock_guard<std::mutex> g(g_bladeMtx);
+    const PlayToWorld& m = g_playToWorld[hand];
+    if (!m.valid || NowSec() - m.stamp > 0.1) return false;
+    *origin = m.origin; *rot = m.rot; *scale = m.scale;
+    return true;
+}
 
 bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip) {
     if (hand != HandLeft && hand != HandRight) return false;
