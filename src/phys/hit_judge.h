@@ -17,7 +17,9 @@ namespace kinetic {
 void HitJudgeFrame(uint8_t* player, double now);
 void HitJudgeReset();
 
-// The enemy weapon's blade axis learned from the blows you took: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z; -1 not yet.
-int HitJudgeWeaponAxis();
+// The blade direction of an enemy kind's weapon in its weapon bone's frame, learned from the blows you took
+// (any direction, not only the bone's axes; kept across sessions in KineticWeapons.txt next to ERVR.ini).
+// False until learned.
+bool HitJudgeWeaponDir(int npcId, float dir[3]);
 
 }  // namespace kinetic

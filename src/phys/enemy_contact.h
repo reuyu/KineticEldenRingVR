@@ -24,6 +24,7 @@ struct ContactPart {
     float radius;
     ervr::Vec3 axis[3];    // kind 2: the weapon bone's local x, y, z in the world (the blade lies along one of them)
     float length;          // kind 2: EnemyWeaponLength
+    int npcId;             // NpcParam row of the enemy (kind 2: whose learned blade direction this is)
     ervr::Vec3 da, db;     // where the part really is: a/b with the arm's swing applied. For the weapon, a/b is
                            // where the ANIMATION wants it (the physics weapon is driven toward that) and da/db
                            // follows the physics weapon your blade may be holding off.

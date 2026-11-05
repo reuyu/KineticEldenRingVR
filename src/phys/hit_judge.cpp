@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <atomic>
 #include <deque>
+#include <cstdio>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace kinetic {
 
@@ -19,18 +21,22 @@ namespace {
 
 using ervr::Vec3;
 
-struct Sample { double t; float dBody; bool shield; float speed; float dRoot; float dCand[6]; };
-struct WeaponTrack { Vec3 lastTip{}; double lastT = 0; bool have = false; std::deque<Sample> hist; };
+// Candidate blade directions in the weapon bone's frame, spread evenly over the sphere.
+constexpr int kDirs = 128;
+Vec3 g_dirs[kDirs];
+struct Sample { double t; float dBody; bool shield; float speed; float dRoot; float dCand[kDirs]; };
+struct WeaponTrack { Vec3 lastTip{}; double lastT = 0; bool have = false; int npcId = 0; std::deque<Sample> hist; };
+// Per enemy kind: how many blows each candidate direction would have reached you on.
+struct Learn { int reach[kDirs] = {}; int trials = 0; bool known = false; Vec3 dir{1, 0, 0}; float share = 0.f; };
+std::mutex g_learnMtx;
+std::unordered_map<int, Learn> g_learn;
+bool g_learnLoaded = false;
 
 std::unordered_map<uint32_t, WeaponTrack> g_tracks;
 int g_prevHp = -1;
 double g_logAt = 0;
 int g_kept = 0, g_refunded = 0, g_grazed = 0, g_shielded = 0, g_untouched = 0;   // statistics for the log
 long g_hpBack = 0, g_hpKept = 0, g_shieldStam = 0;
-// Weapon axis learning: per candidate axis, how many blows it would have reached you on.
-int g_axisReach[6] = {}, g_axisTrials = 0;
-std::atomic<int> g_axisBest{-1};
-const char* kAxisName[6] = {"+x", "-x", "+y", "-y", "+z", "-z"};
 
 float Clamp01(float v) { return v < 0.f ? 0.f : v > 1.f ? 1.f : v; }
 
@@ -61,7 +67,63 @@ float SegPointDistance(const Vec3& p, const Vec3& q, const Vec3& x) { return Seg
 
 void HitJudgeReset() { g_tracks.clear(); g_prevHp = -1; }
 
-int HitJudgeWeaponAxis() { return g_axisBest.load(); }
+namespace {
+
+std::wstring LearnPath() {
+    std::wstring p = ervr::Cfg().iniPath;
+    const size_t s = p.find_last_of(L"\\/");
+    return (s == std::wstring::npos ? std::wstring() : p.substr(0, s + 1)) + L"KineticWeapons.txt";
+}
+
+void InitDirs() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const float ga = 2.39996323f;   // golden angle
+    for (int i = 0; i < kDirs; ++i) {
+        const float y = 1.f - 2.f * (i + 0.5f) / kDirs, r = std::sqrt(std::max(0.f, 1.f - y * y));
+        g_dirs[i] = Vec3{std::cos(ga * i) * r, y, std::sin(ga * i) * r};
+    }
+}
+
+// Lines "npcId dx dy dz reach trials": what earlier sessions learned (game thread, once).
+void LoadLearned() {
+    if (g_learnLoaded) return;
+    g_learnLoaded = true;
+    FILE* f = _wfopen(LearnPath().c_str(), L"r");
+    if (!f) return;
+    int npc, reach, trials; float x, y, z; int n = 0;
+    std::lock_guard<std::mutex> lock(g_learnMtx);
+    while (fscanf(f, "%d %f %f %f %d %d", &npc, &x, &y, &z, &reach, &trials) == 6) {
+        Learn& L = g_learn[npc];
+        L.known = true; L.dir = Vec3{x, y, z}.Normalized(); L.trials = trials; L.share = trials > 0 ? (float)reach / trials : 0.f;
+        // seed the counts so new blows refine it rather than start over
+        for (int k = 0; k < kDirs; ++k) if (g_dirs[k].Dot(L.dir) > 0.94f) L.reach[k] = reach;
+        ++n;
+    }
+    fclose(f);
+    LOGI("[phys] weapon directions: %d enemy kind(s) loaded from KineticWeapons.txt", n);
+}
+
+void SaveLearned() {
+    FILE* f = _wfopen(LearnPath().c_str(), L"w");
+    if (!f) return;
+    for (const auto& kv : g_learn)
+        if (kv.second.known)
+            fprintf(f, "%d %.4f %.4f %.4f %d %d\n", kv.first, kv.second.dir.x, kv.second.dir.y, kv.second.dir.z,
+                    (int)std::lround(kv.second.share * kv.second.trials), kv.second.trials);
+    fclose(f);
+}
+
+}  // namespace
+
+bool HitJudgeWeaponDir(int npcId, float dir[3]) {
+    std::lock_guard<std::mutex> lock(g_learnMtx);
+    auto it = g_learn.find(npcId);
+    if (it == g_learn.end() || !it->second.known) return false;
+    dir[0] = it->second.dir.x; dir[1] = it->second.dir.y; dir[2] = it->second.dir.z;
+    return true;
+}
 
 namespace {
 bool AutoAxis() {
@@ -74,6 +136,8 @@ void HitJudgeFrame(uint8_t* player, double now) {
     const auto& c = ervr::Cfg();
     if (!c.physicsHitJudge || !player) { g_prevHp = -1; return; }
     const double window = std::max(c.physicsHitWindow, 0.05f);
+    InitDirs();
+    LoadLearned();
 
     // Your body: feet to eyes.
     Vec3 feet; ervr::Quat rootQ;
@@ -97,6 +161,7 @@ void HitJudgeFrame(uint8_t* player, double now) {
     for (int i = 0; i < n; ++i) {
         if (parts[i].kind != 2) continue;
         WeaponTrack& w = g_tracks[parts[i].key];
+        w.npcId = parts[i].npcId;
         // Where the weapon really is (held off by your blade, its arm turned), not where the animation wants it.
         const Vec3 a = parts[i].da, b = parts[i].db;
         float speed = 0.f;
@@ -105,8 +170,12 @@ void HitJudgeFrame(uint8_t* player, double now) {
         const float dBody = SegSegDistance(a, b, b0, b1) - bodyR - parts[i].radius;
         const bool onShield = shield && SegPointDistance(a, b, shieldC) < shieldR + parts[i].radius;
         Sample smp{now, dBody, onShield, speed, SegPointDistance(b0, b1, a) - bodyR, {}};
-        for (int k = 0; k < 6; ++k) {
-            const Vec3 ax = parts[i].axis[k / 2] * (k % 2 ? -1.f : 1.f);
+        // Every candidate blade direction (in the weapon bone's frame) from the grip: how close it came to you.
+        const float rootD = smp.dRoot;
+        for (int k = 0; k < kDirs; ++k) {
+            if (rootD > parts[i].length + 0.3f) { smp.dCand[k] = rootD; continue; }   // out of reach whichever way
+            const Vec3& d = g_dirs[k];
+            const Vec3 ax = parts[i].axis[0] * d.x + parts[i].axis[1] * d.y + parts[i].axis[2] * d.z;
             smp.dCand[k] = SegSegDistance(a, a + ax * parts[i].length, b0, b1) - bodyR - parts[i].radius;
         }
         w.hist.push_back(smp);
@@ -125,37 +194,57 @@ void HitJudgeFrame(uint8_t* player, double now) {
         bool near = false, touched = false, shielded = false;
         float touchSpeed = 0.f;
         double firstShield = 1e18, firstBody = 1e18;
-        float candMin[6] = {1e9f, 1e9f, 1e9f, 1e9f, 1e9f, 1e9f};
-        const bool learned = !AutoAxis() || g_axisBest.load() >= 0;
-        for (const auto& kv : g_tracks)
+        // Per weapon (enemy kind) near you in the window: the closest each candidate direction came.
+        struct Near { int npc; float candMin[kDirs]; };
+        std::vector<Near> nears;
+        for (const auto& kv : g_tracks) {
+            bool trackNear = false;
+            Near nr{kv.second.npcId, {}};
+            for (int k = 0; k < kDirs; ++k) nr.candMin[k] = 1e9f;
+            bool learned = !AutoAxis();
+            { float dd[3]; learned = learned || HitJudgeWeaponDir(kv.second.npcId, dd); }
             for (const Sample& s : kv.second.hist) {
-                if (s.dRoot < 1.2f) near = true;   // the weapon's grip came within reach, whatever its blade axis
+                if (s.dRoot < 1.2f) { near = true; trackNear = true; }   // its grip came within reach, whatever its blade direction
                 if (s.shield) { shielded = true; firstShield = std::min(firstShield, s.t); }
-                for (int k = 0; k < 6; ++k) candMin[k] = std::min(candMin[k], s.dCand[k]);
-                // Until the blade axis is known, any axis that would have reached you counts as a touch.
-                float d = s.dBody;
-                if (!learned) for (int k = 0; k < 6; ++k) d = std::min(d, s.dCand[k]);
+                float any = 1e9f;
+                for (int k = 0; k < kDirs; ++k) { nr.candMin[k] = std::min(nr.candMin[k], s.dCand[k]); any = std::min(any, s.dCand[k]); }
+                // Until the blade direction is known, any direction that would have reached you counts as a touch.
+                const float d = learned ? s.dBody : std::min(s.dBody, any);
                 if (d < 0.f) { touched = true; touchSpeed = std::max(touchSpeed, s.speed); firstBody = std::min(firstBody, s.t); }
             }
-        // Learn the axis: on a blow that came with an enemy weapon near, the true blade axis must have reached you.
-        if (near && !shielded) {
-            ++g_axisTrials;
-            for (int k = 0; k < 6; ++k) if (candMin[k] < 0.05f) ++g_axisReach[k];
-            int best = -1, second = 0;
-            for (int k = 0; k < 6; ++k) {
-                if (best < 0 || g_axisReach[k] > g_axisReach[best]) { if (best >= 0) second = std::max(second, g_axisReach[best]); best = k; }
-                else second = std::max(second, g_axisReach[k]);
+            if (trackNear) nears.push_back(nr);
+        }
+        // Learn the direction: on a blow that came with one enemy weapon near, its true blade must have reached you.
+        if (nears.size() == 1 && !shielded) {
+            const Near& nr = nears[0];
+            std::lock_guard<std::mutex> lock(g_learnMtx);
+            Learn& L = g_learn[nr.npc];
+            ++L.trials;
+            for (int k = 0; k < kDirs; ++k) if (nr.candMin[k] < 0.05f) ++L.reach[k];
+            // Smoothed over neighbouring directions (within ~25 deg): the best cone, and its weighted centre.
+            int best = -1; float bestScore = 0.f;
+            for (int k = 0; k < kDirs; ++k) {
+                float sc = 0.f;
+                for (int j = 0; j < kDirs; ++j) { const float w = g_dirs[k].Dot(g_dirs[j]) - 0.906f; if (w > 0.f) sc += w * L.reach[j]; }
+                if (sc > bestScore) { bestScore = sc; best = k; }
             }
-            const int prev = g_axisBest.load();
-            if (g_axisTrials >= 3 && best >= 0 && g_axisReach[best] >= 2 && g_axisReach[best] > second && best != prev) {
-                g_axisBest.store(best);
-                LOGI("[phys] weapon axis: %s reached you on %d of %d blows (next best %d)%s", kAxisName[best], g_axisReach[best], g_axisTrials, second,
-                     AutoAxis() ? " - the enemy weapon capsule now uses it" : " - set [Physics] EnemyWeaponAxis to it (or auto)");
+            if (best >= 0) {
+                Vec3 m{};
+                for (int j = 0; j < kDirs; ++j) { const float w = g_dirs[best].Dot(g_dirs[j]) - 0.906f; if (w > 0.f) m = m + g_dirs[j] * (w * L.reach[j]); }
+                const Vec3 dir = m.Length() > 1e-4f ? m.Normalized() : g_dirs[best];
+                const float share = (float)L.reach[best] / L.trials;
+                const bool was = L.known;
+                const float moved = was ? std::acos(std::min(1.f, std::max(-1.f, dir.Dot(L.dir)))) * 57.3f : 180.f;
+                if (L.trials >= 3 && L.reach[best] >= 3 && share >= 0.5f && moved > 5.f) {
+                    L.known = true; L.dir = dir; L.share = share;
+                    SaveLearned();
+                    LOGI("[phys] weapon direction npc %d: (%.2f %.2f %.2f) in its weapon bone's frame, reached you on %d of %d blows%s", nr.npc,
+                         dir.x, dir.y, dir.z, L.reach[best], L.trials, was ? " (refined)" : " - its capsule now uses it");
+                } else if (L.known) L.share = share;
+                if (c.physicsContactLog)
+                    LOGI("[phys] weapon direction check npc %d: best (%.2f %.2f %.2f) reached %d of %d blows%s", nr.npc, g_dirs[best].x, g_dirs[best].y,
+                         g_dirs[best].z, L.reach[best], L.trials, L.known ? "" : " (not yet sure)");
             }
-            if (c.physicsContactLog)
-                LOGI("[phys] weapon axis check: closest to your body +x %.2f -x %.2f +y %.2f -y %.2f +z %.2f -z %.2f m (reached so far %d/%d/%d/%d/%d/%d of %d)",
-                     candMin[0], candMin[1], candMin[2], candMin[3], candMin[4], candMin[5],
-                     g_axisReach[0], g_axisReach[1], g_axisReach[2], g_axisReach[3], g_axisReach[4], g_axisReach[5], g_axisTrials);
         }
         // With [Combat] Block on the shield is the game's own guard: it already blocked (and charged stamina).
         if (c.blockEnabled) shielded = false;

@@ -212,13 +212,8 @@ void ContactFrame(uint8_t* player, double now) {
     const float k = std::max(c.physicsEnemyArmStiffness, 0.f);
     const float damp = 2.f * std::max(c.physicsEnemyArmDamping, 0.f) * std::sqrt(k * inertia);
     const float maxRad = std::min(std::max(c.physicsEnemyArmMaxDeg, 0.f), 150.f) * 0.0174533f;
-    Vec3 weaponAxis = AxisFrom(c.physicsEnemyWeaponAxis);
-    if (c.physicsEnemyWeaponAxis.empty() || std::tolower((unsigned char)c.physicsEnemyWeaponAxis[0]) == 'a') {
-        // auto: the axis the hit judge has learned from the blows you took (+x until it knows).
-        static const Vec3 kAxes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-        const int learned = HitJudgeWeaponAxis();
-        weaponAxis = learned >= 0 && learned < 6 ? kAxes[learned] : kAxes[0];
-    }
+    const bool autoAxis = c.physicsEnemyWeaponAxis.empty() || std::tolower((unsigned char)c.physicsEnemyWeaponAxis[0]) == 'a';
+    const Vec3 fixedAxis = AxisFrom(c.physicsEnemyWeaponAxis);
 
     for (auto& a : g_arms) a.seen = false;
     for (auto& t : g_torsos) t.seen = false;
@@ -320,6 +315,10 @@ void ContactFrame(uint8_t* player, double now) {
             const bool hasWeapon = s == 1 && wb >= 0 && c.physicsEnemyWeaponLength > 0.05f;
             Vec3 W0{}, T0{}; Quat wq0{};
             if (hasWeapon) {
+                // auto: the direction the hit judge learned for this enemy kind from the blows you took (+x until then)
+                Vec3 weaponAxis = autoAxis ? Vec3{1, 0, 0} : fixedAxis;
+                float ld[3];
+                if (autoAxis && HitJudgeWeaponDir(t.npcId, ld)) weaponAxis = Vec3{ld[0], ld[1], ld[2]};
                 W0 = worldU(wb);
                 wq0 = (TR * rootQ * mq[wb]).Normalized();
                 T0 = W0 + wq0.Rotate(weaponAxis) * c.physicsEnemyWeaponLength;
@@ -364,6 +363,7 @@ void ContactFrame(uint8_t* player, double now) {
             if (hasWeapon) {
                 ContactPart wp = MakePart(PartKey(t.chr, s, 2), t.chr, s, 2, W0, T0, 0.05f);
                 wp.length = c.physicsEnemyWeaponLength;
+                wp.npcId = t.npcId;
                 wp.da = swung(W0); wp.db = held ? a->simTip : swung(T0);
                 const Quat wq = (R * wq0).Normalized();
                 wp.axis[0] = wq.Rotate(Vec3{1, 0, 0}); wp.axis[1] = wq.Rotate(Vec3{0, 1, 0}); wp.axis[2] = wq.Rotate(Vec3{0, 0, 1});
