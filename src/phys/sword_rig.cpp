@@ -52,7 +52,7 @@ constexpr int kMaxParts = 96;
 // A box part (an enemy weapon or shield from its model's mesh): pose is the box's centre in its node's frame, half
 // its half extents, grip the node's origin (where the hand holds it) and tip the end of its line along x farthest
 // from the grip, both in the box's frame.
-struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; bool box, shield; PxVec3 half, grip, tip; };
+struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; bool box, shield; PxVec3 half, grip, tip; float worldSpeed; };
 
 // A blade meeting a body part for the first time (TOUCH_FOUND), to be classified after the sub-step.
 struct Impact { int slot; PxVec3 point; };
@@ -151,6 +151,7 @@ struct Rig {
     PxShape* enemyShape[kMaxParts]{};
     PxShape* enemyBox[kMaxParts]{};              // the same actor's box (weapons, shields); one of the two is on
     bool slotBox[kMaxParts]{};
+    float slotWorldSpeed[kMaxParts]{};           // the part's own speed in the world (m/s), for the impact log
     uint32_t slotKey[kMaxParts]{};               // which part a slot holds (0 = free)
     PxTransform slotFrom[kMaxParts], slotTo[kMaxParts];
     bool slotActive[kMaxParts]{};
@@ -460,7 +461,7 @@ void SyncEnemies(Rig& r, const Params& p) {
         const PlayPart& pp = p.parts[i];
         if (pp.box) r.enemyBox[k]->setGeometry(PxBoxGeometry(PxVec3(std::fmax(pp.half.x, 0.002f), std::fmax(pp.half.y, 0.002f), std::fmax(pp.half.z, 0.002f))));
         else r.enemyShape[k]->setGeometry(PxCapsuleGeometry(pp.radius, pp.halfHeight > 0.001f ? pp.halfHeight : 0.001f));
-        r.slotBox[k] = pp.box;
+        r.slotBox[k] = pp.box; r.slotWorldSpeed[k] = pp.worldSpeed;
         if (!r.slotActive[k]) {
             // New part: put it there outright (no sweep from the parking spot).
             r.enemy[k]->setGlobalPose(pp.pose);
@@ -536,9 +537,20 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
         if (c.physicsContactLog && r.impactLogN < 30) {
             ++r.impactLogN;
             const PxVec3 s0 = pose.q.rotate(p.shaft);
-            LOGI("[phys] impact %s: kind %d, blade %.1f m/s (lin %.1f, ang %.1f rad/s), part %.1f m/s, relative %.1f m/s -> %.0f J (x%.2f STR), %.2f m from grip, dt %.4f s, blade lag %.1f cm",
-                 r.hand ? "R" : "L", r.slotKind[k], vBlade.magnitude(), preLin.magnitude(), preAng.magnitude(), vPart.magnitude(), speed, E, p.strFactor,
-                 (im.point - pose.p).dot(s0), p.dt, 100.f * (pose.p - p.target.p).magnitude());
+            // The mass the part really meets at that point: a blade turning about its grip hits with less than its
+            // whole mass (1 / (1/m + (r x n) I^-1 (r x n)), n along the relative velocity).
+            float mEff = r.body->getMass();
+            if (speed > 1e-3f) {
+                const PxVec3 n = v * (1.f / speed), rn = (im.point - com).cross(n);
+                const PxQuat qm = pose.q * r.body->getCMassLocalPose().q;
+                const PxVec3 l = qm.rotateInv(rn), inv = r.body->getMassSpaceInvInertiaTensor();
+                const float x = l.x * l.x * inv.x + l.y * l.y * inv.y + l.z * l.z * inv.z;
+                mEff = 1.f / (1.f / std::fmax(r.body->getMass(), 1e-3f) + x);
+            }
+            LOGI("[phys] impact %s: kind %d, blade %.1f m/s (lin %.1f, ang %.1f rad/s), part %.1f m/s in your tracking space (%.1f m/s in the world), relative %.1f m/s -> %.0f J with the whole %.1f kg (x%.2f STR); effective mass at that point %.2f kg -> %.0f J; %.2f m from grip, dt %.4f s, blade lag %.1f cm",
+                 r.hand ? "R" : "L", r.slotKind[k], vBlade.magnitude(), preLin.magnitude(), preAng.magnitude(), vPart.magnitude(), r.slotWorldSpeed[k], speed, E,
+                 r.body->getMass(), p.strFactor, mEff, 0.5f * mEff * speed * speed * p.strFactor, (im.point - pose.p).dot(s0), p.dt,
+                 100.f * (pose.p - p.target.p).magnitude());
         }
         r.energyMax = std::fmax(r.energyMax, E);
         const int kind = r.slotKind[k];
@@ -833,7 +845,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
             pp.kind = parts[i].kind;
             pp.halfHeight = len * 0.5f;
             pp.radius = parts[i].radius / scale;
-            pp.box = parts[i].box; pp.shield = parts[i].shield;
+            pp.box = parts[i].box; pp.shield = parts[i].shield; pp.worldSpeed = parts[i].worldSpeed;
             if (pp.box) {
                 // The mesh's box in its node's frame: the actor sits at the box's centre, turned like the node.
                 const ervr::Vec3 lo = parts[i].lo, hi = parts[i].hi, ctr = (lo + hi) * 0.5f;

@@ -369,12 +369,52 @@ void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
             uint32_t v; std::memcpy(&v, &b[o], 4);
             if (v == mask && mask != 0) LOGI("[dmy] npc %d: mask value at %s+0x%zx", npc, what, o);
         }
+        // or as 32 bools (one byte per bit)
+        for (size_t o = 0; o + 32 <= len; ++o) {
+            bool same = true;
+            for (int k = 0; k < 32 && same; ++k) same = b[o + k] == ((mask >> k) & 1u);
+            if (same && mask != 0) LOGI("[dmy] npc %d: mask as 32 bools at %s+0x%zx", npc, what, o);
+        }
     };
     uintptr_t mi = 0; ervr::SafeRead(chr + 0x50, &mi, 8);
-    findMask("chr", (uintptr_t)chr, 0x1000);
-    findMask("modelins", mi, 0x400);
-    findMask("item", item, 0x700);
+    findMask("chr", (uintptr_t)chr, 0x2000);
+    findMask("modelins", mi, 0x1000);
+    findMask("item", item, 0x1000);
     findMask("flverdata", fl, 0x200);
+    // one level down from the model instance and item
+    for (const auto& base : {std::make_pair("modelins", mi), std::make_pair("item", item)}) {
+        uintptr_t q[0x80] = {};
+        if (!PtrLike(base.second) || !ervr::SafeRead((void*)base.second, q, sizeof(q))) continue;
+        for (int i = 1; i < 0x80; ++i) {
+            if (!PtrLike(q[i]) || InModule(q[i])) continue;
+            char nm[48]; snprintf(nm, sizeof(nm), "%s+0x%x->", base.first, i * 8);
+            findMask(nm, q[i], 0x400);
+        }
+    }
+    // single-byte strings behind flverdata with '#' (material names carry the mask bit as #NN#)
+    {
+        uintptr_t q2[0x40] = {};
+        if (PtrLike(fl) && ervr::SafeRead((void*)fl, q2, sizeof(q2)))
+            for (int i = 1; i < 0x40; ++i) {
+                if (!PtrLike(q2[i]) || InModule(q2[i])) continue;
+                std::vector<char> a(0x10000);
+                size_t got = 0;
+                for (size_t n = a.size(); n >= 0x100; n /= 4) if (ervr::SafeRead((void*)q2[i], a.data(), n)) { got = n; break; }
+                std::string line; int hashes = 0, strs = 0;
+                size_t k = 0;
+                while (k < got) {
+                    size_t e = k;
+                    while (e < got && a[e] >= 32 && a[e] < 127) ++e;
+                    if (e - k >= 4) {
+                        ++strs;
+                        std::string s(&a[k], e - k);
+                        if (s.find('#') != std::string::npos && line.size() < 3000) { line += s + " | "; ++hashes; }
+                    }
+                    k = e + 1;
+                }
+                if (hashes) LOGI("[dmy]   ascii flverdata+0x%x: %d strings, %d with '#': %s", i * 8, strs, hashes, line.c_str());
+            }
+    }
     // text tables and int tables behind flverdata
     uintptr_t q[0x40] = {};
     if (!PtrLike(fl) || !ervr::SafeRead((void*)fl, q, sizeof(q))) return;
@@ -412,10 +452,14 @@ void DumpMeshMask(uint8_t* chr, uintptr_t item, uintptr_t fl, int npc) {
 }  // namespace
 
 void DummyProbeFrame() {
-    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 3) return;
+    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 8) return;
     for (const TrackedChr& t : TrackerList()) {
-        if (!t.chr || t.distance > 6.f || g_dmyDone.count(t.npcId) || t.boneCount < 20) continue;
-        g_dmyDone.insert(t.npcId);
+        if (!t.chr || t.distance > 6.f || t.boneCount < 20) continue;
+        // once per NpcParam row: enemies of one model with different weapons have different rows
+        int32_t paramId = -1;
+        ervr::SafeRead(t.chr + 0x60, &paramId, 4);
+        if (g_dmyDone.count(paramId)) continue;
+        g_dmyDone.insert(paramId);
         uintptr_t mi = 0, res = 0, item = 0;
         ervr::SafeRead(t.chr + 0x50, &mi, 8);
         ervr::SafeRead(t.chr + 0x28, &res, 8);

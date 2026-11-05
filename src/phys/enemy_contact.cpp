@@ -76,6 +76,7 @@ std::vector<Arm> g_arms;
 std::vector<Torso> g_torsos;
 double g_bodyLogAt = 0;
 std::vector<ContactPart> g_parts;
+std::vector<std::pair<uint32_t, Vec3>> g_prevCentre;   // last frame's part centres, for worldSpeed
 double g_last = 0;
 // statistics for the 5 s log
 double g_logAt = 0;
@@ -611,6 +612,18 @@ void ContactFrame(uint8_t* player, double now) {
     g_arms.erase(std::remove_if(g_arms.begin(), g_arms.end(), [](const Arm& a) { return !a.seen; }), g_arms.end());
     g_shapes.erase(std::remove_if(g_shapes.begin(), g_shapes.end(), [](const Shapes& s) { return !s.seen; }), g_shapes.end());
     g_weapons.erase(std::remove_if(g_weapons.begin(), g_weapons.end(), [](const Weapons& w) { return !w.seen; }), g_weapons.end());
+    // Each part's speed in the world (not in your tracking space, which moves when you walk or turn).
+    {
+        std::vector<std::pair<uint32_t, Vec3>> cur;
+        cur.reserve(g_parts.size());
+        for (auto& p : g_parts) {
+            const Vec3 m = (p.da + p.db) * 0.5f;
+            p.worldSpeed = -1.f;
+            if (dt > 0.f) for (const auto& pc : g_prevCentre) if (pc.first == p.key) { p.worldSpeed = (m - pc.second).Length() / dt; break; }
+            cur.emplace_back(p.key, m);
+        }
+        g_prevCentre.swap(cur);
+    }
 
     if (now - g_logAt >= 5.0) {
         if (c.physicsContactLog && (enemies > 0 || g_hits > 0))

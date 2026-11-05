@@ -31,6 +31,7 @@ struct ContactPart {
     ervr::Vec3 boneP;      // the node's origin (the grip) in the world, with the arm's swing applied
     ervr::Quat boneQ;      // its rotation in the world, with the swing
     ervr::Vec3 lo, hi;     // the box in that frame (m)
+    float worldSpeed;      // how fast its centre moved in the world since the last frame (m/s), for the impact log
     ervr::Vec3 da, db;     // where the part really is: a/b with the arm's swing applied. For the weapon, a/b is
                            // where the ANIMATION wants it (the physics weapon is driven toward that) and da/db
                            // follows the physics weapon your blade may be holding off.
