@@ -50,9 +50,9 @@ std::atomic<int> g_resetMask{3};
 // M2.5: enemy capsules (enemy_contact), converted into this hand's tracking frame.
 constexpr int kMaxParts = 96;
 // A box part (an enemy weapon or shield from its model's mesh): pose is the box's centre in its node's frame, half
-// its half extents, grip the node's origin (where the hand holds it) and far the end of its line along x farthest
+// its half extents, grip the node's origin (where the hand holds it) and tip the end of its line along x farthest
 // from the grip, both in the box's frame.
-struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; bool box, shield; PxVec3 half, grip, far; };
+struct PlayPart { uint32_t key; int kind; PxTransform pose; float halfHeight, radius; bool box, shield; PxVec3 half, grip, tip; };
 
 // A blade meeting a body part for the first time (TOUCH_FOUND), to be classified after the sub-step.
 struct Impact { int slot; PxVec3 point; };
@@ -413,7 +413,7 @@ void WeaponDynamic(Rig& r, const Params& p, int k, const PlayPart& pp) {
     // Its shape: a box (from the model) or a capsule along x.
     const PxVec3 half = pp.box ? pp.half : PxVec3(pp.halfHeight + pp.radius, pp.radius, pp.radius);
     const PxVec3 grip = pp.box ? pp.grip : PxVec3(-pp.halfHeight, 0.f, 0.f);
-    r.wFar[k] = pp.box ? pp.far : PxVec3(pp.halfHeight, 0.f, 0.f);
+    r.wFar[k] = pp.box ? pp.tip : PxVec3(pp.halfHeight, 0.f, 0.f);
     if ((half - r.wHalfV[k]).abs().maxElement() > 0.005f || (grip - r.wGrip[k]).abs().maxElement() > 0.005f || pp.shield != r.wShield[k] || !r.wJoint[k]) {
         r.wHalfV[k] = half; r.wGrip[k] = grip; r.wShield[k] = pp.shield;
         const float m = std::fmax(pp.shield ? p.shieldKg : p.enemyKg, 0.3f);
@@ -841,7 +841,7 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
                 pp.half = ToPx((hi - lo) * (0.5f / scale));
                 pp.grip = ToPx(ctr * (-1.f / scale));
                 const float fx = std::fabs(hi.x) > std::fabs(lo.x) ? hi.x : lo.x;
-                pp.far = ToPx((ervr::Vec3{fx, 0.f, 0.f} - ctr) * (1.f / scale));
+                pp.tip = ToPx((ervr::Vec3{fx, 0.f, 0.f} - ctr) * (1.f / scale));
                 pp.pose = PxTransform(ToPx(inv.Rotate(cw - origin) * (1.f / scale)), ToPx((inv * parts[i].boneQ).Normalized()));
                 continue;
             }
