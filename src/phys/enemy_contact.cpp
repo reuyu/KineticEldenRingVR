@@ -618,8 +618,8 @@ void ContactFrame(uint8_t* player, double now) {
         cur.reserve(g_parts.size());
         for (auto& p : g_parts) {
             const Vec3 m = (p.da + p.db) * 0.5f;
-            p.worldSpeed = -1.f;
-            if (dt > 0.f) for (const auto& pc : g_prevCentre) if (pc.first == p.key) { p.worldSpeed = (m - pc.second).Length() / dt; break; }
+            p.worldSpeed = -1.f; p.worldVel = Vec3{};
+            if (dt > 0.f) for (const auto& pc : g_prevCentre) if (pc.first == p.key) { p.worldVel = (m - pc.second) * (1.f / dt); p.worldSpeed = p.worldVel.Length(); break; }
             cur.emplace_back(p.key, m);
         }
         g_prevCentre.swap(cur);

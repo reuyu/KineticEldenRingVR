@@ -862,6 +862,8 @@ struct Config {
     bool  physicsGateStrikes = true;
     float physicsArmHitEnergy = 110.f;        // J
     float physicsBodyFriction = 300.f;        // N*s/m resisting a blade sliding in or out
+    bool physicsSwingOwnOnly = true;          // a blow's speed: your hand's own motion against the part's motion in the world
+                                              // (false: also the carry when the game moves you - knock-back, lock-on turning)
     // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always
     // holds and costs stamina instead. Damage the game deals with no enemy weapon near you is left alone.
     bool  physicsHitJudge = true;
