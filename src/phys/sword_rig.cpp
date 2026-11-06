@@ -169,8 +169,8 @@ struct Rig {
     double simTime = 0;
     Impact impacts[kMaxImpacts]; int nImpacts = 0;
     PxD6Joint* embed = nullptr; int embedSlot = -1; uint32_t embedKey = 0; double embedSince = 0;
-    float embedBack = 0.02f;
-    float embedPullMax = 0.f;                    // largest pull of a stuck blade on its part (N), for the 5 s log                     // m back along the way in (past the entry) before it comes free
+    float embedBack = 0.02f;                     // m back along the way in (past the entry) before it comes free
+    float embedPullMax = 0.f;                    // largest pull of a stuck blade on its part (N), for the 5 s log
     // A slash going into a part (TendCut): the part lets the blade through while it resists; out the other side is a
     // cut, slowed below BodyStickSpeed still inside is stuck.
     bool cutting[kMaxParts]{}, cutInside[kMaxParts]{};
@@ -584,6 +584,15 @@ void ClassifyImpacts(Rig& r, const Params& p, const PxVec3& preLin, const PxVec3
         r.energyMax = std::fmax(r.energyMax, E);
         const int kind = r.slotKind[k];
         if (kind == 2) { g_blockedAt[r.hand].store(wall); ++r.parries; continue; }   // blade on blade: a parry, never a hit
+        if (c.physicsBodyStickAll) {                                                  // test: every blow sticks
+            if (r.embed) continue;                                                    // one stuck blade at a time
+            const PxVec3 dir = speed > 1e-3f ? v * (1.f / speed) : pose.q.rotate(p.shaft);
+            const float back = std::fmax(c.physicsBodyStickAllBack, 0.02f);
+            Embed(r, p, k, im.point, dir, back, back);
+            ++r.sticks; g_struckAt[r.hand].store(wall);
+            LOGI("[phys] stick-all %s: kind %d, %.0f J, %.1f m/s -> stuck, %.0f cm to pull out", r.hand ? "R" : "L", kind, E, speed, 100.f * back);
+            continue;
+        }
         if (kind < 2) {                                                               // an arm: pushed, or hit hard
             if (E >= c.physicsArmHitEnergy) { g_struckAt[r.hand].store(wall); ++r.armHits; }
             else { g_blockedAt[r.hand].store(wall); ++r.armPushes; }
@@ -726,7 +735,11 @@ void TendEmbed(Rig& r) {
     const bool gone = r.embedSlot < 0 || !r.slotActive[r.embedSlot] || r.slotKey[r.embedSlot] != r.embedKey;
     const bool broken = (r.embed->getConstraintFlags() & PxConstraintFlag::eBROKEN);
     const bool out = r.embed->getRelativeTransform().p.x < -r.embedBack;
-    if (gone || broken || out || r.simTime - r.embedSince > 10.0) ReleaseEmbed(r, 0.15f);
+    if (gone || broken || out || r.simTime - r.embedSince > 10.0) {
+        LOGI("[phys] stuck blade %s free after %.2f s: %s, pulled %.0f N max", r.hand ? "R" : "L", r.simTime - r.embedSince,
+             gone ? "its part went away" : broken ? "yanked out (joint broke)" : out ? "pulled out" : "10 s", r.embedPullMax);
+        ReleaseEmbed(r, 0.15f);
+    }
 }
 
 // The simulation proper. No C++ objects with destructors: called inside an SEH guard.
@@ -737,6 +750,8 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
     UpdateDrives(r, p);
     if (!r.placed || (r.body->getGlobalPose().p - p.target.p).magnitude() > p.snap) {
         if (r.placed) ++r.snaps;
+        if (r.embed) LOGI("[phys] stuck blade %s free after %.2f s: your hand went %.2f m from the blade (SwordSnapDistance)", r.hand ? "R" : "L",
+                          r.simTime - r.embedSince, (r.body->getGlobalPose().p - p.target.p).magnitude());
         ReleaseEmbed(r, 0.3f);   // your hand went too far from a stuck blade: it comes out (no damage)
         Place(r, p.target);
     }

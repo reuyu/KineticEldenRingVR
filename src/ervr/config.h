@@ -866,6 +866,8 @@ struct Config {
     float physicsBodyCutResistance = 1300.f;  // N a part resists a blade going through it
     float physicsBodyStickSpeed = 1.0f;       // m/s: slower than this still inside, the blade is stuck
     float physicsGlanceDamage = 0.1f;         // share of a hit a glance deals
+    bool physicsBodyStickAll = false;         // test: every blow on a body part sticks where it lands
+    float physicsBodyStickAllBack = 0.10f;    // test: m it must be pulled back out the way it went in
     bool physicsSwingOwnOnly = true;          // a blow's speed: your hand's own motion against the part's motion in the world
                                               // (false: also the carry when the game moves you - knock-back, lock-on turning)
     // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always

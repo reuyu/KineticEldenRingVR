@@ -522,6 +522,8 @@ void Config::Load(const std::wstring& path) {
     physicsBodyCutResistance = GetF(ini, L"Physics", L"BodyCutResistance", physicsBodyCutResistance);
     physicsBodyStickSpeed = GetF(ini, L"Physics", L"BodyStickSpeed", physicsBodyStickSpeed);
     physicsGlanceDamage = GetF(ini, L"Physics", L"GlanceDamage", physicsGlanceDamage);
+    physicsBodyStickAll = GetB(ini, L"Physics", L"BodyStickAll", physicsBodyStickAll);
+    physicsBodyStickAllBack = GetF(ini, L"Physics", L"BodyStickAllBack", physicsBodyStickAllBack);
     physicsSwingOwnOnly = GetB(ini, L"Physics", L"SwingOwnOnly", physicsSwingOwnOnly);
     physicsGateStrikes = GetB(ini, L"Physics", L"GateStrikes", physicsGateStrikes);
     physicsArmHitEnergy = GetF(ini, L"Physics", L"ArmHitEnergy", physicsArmHitEnergy);
