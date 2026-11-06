@@ -415,20 +415,72 @@ void DumpMeshTable(uintptr_t fl, int npc, int param, uint32_t mask) {
         int16_t node; std::memcpy(&node, e + 0x36, 2);
         if (node < 0 || node >= n) { LOGI("[dmy] meshes npc %d param %d: %d entries (entry %d has node %d)", npc, param, i, i, node); break; }
         std::string hex;
-        for (int b = 0x10; b < 0x40; ++b) { char h[4]; snprintf(h, sizeof(h), "%02x", e[b]); hex += h; if ((b & 3) == 3) hex += ' '; }
+        for (int b = 0x00; b < 0x40; ++b) { char h[4]; snprintf(h, sizeof(h), "%02x", e[b]); hex += h; if ((b & 3) == 3) hex += ' '; }
         LOGI("[dmy] mesh %d param %d #%d node %d %s: %s", npc, param, i, node, node < (int)nm.size() ? nm[node].c_str() : "?", hex.c_str());
     }
 }
 
+// Material names: FLVER material names carry the modelDispMask index as #NN# (soulsmodding FLVER notes). Walk
+// two pointer levels from the model objects and log every UTF-16 string with "#<digits>#" or a material path.
+bool WideMatch(const uint16_t* w, size_t n, std::string& out) {
+    out.clear();
+    for (size_t k = 0; k < n && w[k]; ++k) { if (w[k] < 32 || w[k] > 126) return false; out += (char)w[k]; }
+    if (out.size() < 4 || out.size() > 200) return false;
+    for (size_t k = 0; k + 2 < out.size(); ++k)
+        if (out[k] == '#' && isdigit((unsigned char)out[k + 1])) {
+            size_t e = k + 1; while (e < out.size() && isdigit((unsigned char)out[e])) ++e;
+            if (e < out.size() && out[e] == '#') return true;
+        }
+    return out.find(".matxml") != std::string::npos || out.find(".mtd") != std::string::npos;
+}
+
+void ScanStrings(uintptr_t at, const std::string& path, std::set<std::string>& seen, int& lines) {
+    if (!PtrLike(at) || lines >= 160) return;
+    static uint16_t w[0x800];
+    size_t got = 0;
+    for (size_t c = 0x800; c >= 0x40; c /= 2) if (ervr::SafeRead((void*)at, w, c * 2)) { got = c; break; }
+    for (size_t k = 0; k < got && lines < 160; ++k) {
+        if (k && w[k - 1]) continue;   // strings start after a 0 (or at the target)
+        std::string x;
+        if (!WideMatch(w + k, got - k, x) || seen.count(x)) continue;
+        seen.insert(x); ++lines;
+        LOGI("[dmy] material? %s+0x%zx: \"%s\"", path.c_str(), k * 2, x.c_str());
+        k += x.size();
+    }
+}
+
+void DumpMaterialNames(int npc, int param, const uintptr_t* roots, const char* const* rootNames, int nRoots) {
+    std::set<std::string> seen;
+    std::set<uintptr_t> visited;
+    int lines = 0;
+    for (int r = 0; r < nRoots; ++r) {
+        uintptr_t q1[0x80] = {};
+        if (!PtrLike(roots[r]) || !ervr::SafeRead((void*)roots[r], q1, sizeof(q1))) continue;
+        for (int a = 0; a < 0x80; ++a) {
+            if (!PtrLike(q1[a]) || !visited.insert(q1[a]).second) continue;
+            char pa[96]; snprintf(pa, sizeof(pa), "%s+0x%x", rootNames[r], a * 8);
+            ScanStrings(q1[a], pa, seen, lines);
+            uintptr_t q2[0x40] = {};
+            if (!ervr::SafeRead((void*)q1[a], q2, sizeof(q2))) continue;
+            for (int b = 0; b < 0x40; ++b) {
+                if (!PtrLike(q2[b]) || !visited.insert(q2[b]).second) continue;
+                char pb[128]; snprintf(pb, sizeof(pb), "%s->+0x%x", pa, b * 8);
+                ScanStrings(q2[b], pb, seen, lines);
+            }
+        }
+    }
+    LOGI("[dmy] material scan npc %d param %d: %d string(s) with #NN# or a material path, %zu object(s) read", npc, param, lines, visited.size());
+}
+
 // Snapshots of each probed enemy's memory: offsets whose value is the same for every enemy with the same
 // modelDispMask and differs between masks are where the shown meshes may be kept.
-struct Snap { int param; uint32_t mask; std::vector<std::vector<uint8_t>> reg; };
+struct Snap { int param; uint32_t mask; std::vector<std::vector<uint8_t>> reg; int npc = 0; };
 std::vector<Snap> g_snaps;
 const char* kRegName[5] = {"chr", "modelins", "item", "flverdata", "meshtable(flverdata+0x88)"};
-const size_t kRegLen[5] = {0x2000, 0x1000, 0x1000, 0x200, 0x4000};
+const size_t kRegLen[5] = {0x2000, 0x1000, 0x2000, 0x200, 0x4000};
 
-[[maybe_unused]] void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int param, uint32_t mask, int npc) {
-    Snap sn{param, mask, {}};
+void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int param, uint32_t mask, int npc) {
+    Snap sn{param, mask, {}, npc};
     uintptr_t mt = 0;
     if (PtrLike(fl)) ervr::SafeRead((void*)(fl + 0x88), &mt, 8);
     const uintptr_t base[5] = {(uintptr_t)chr, mi, item, fl, mt};
@@ -439,6 +491,10 @@ const size_t kRegLen[5] = {0x2000, 0x1000, 0x1000, 0x200, 0x4000};
     }
     LOGI("[dmy] npc %d param %d: flverdata %p, mesh table %p", npc, param, (void*)fl, (void*)mt);
     g_snaps.push_back(std::move(sn));
+    // compare enemies of the same model only
+    std::vector<Snap> allSnaps = g_snaps;
+    struct Restore { std::vector<Snap>& to; std::vector<Snap> keep; ~Restore() { to = std::move(keep); } } restore{g_snaps, std::move(allSnaps)};
+    g_snaps.erase(std::remove_if(g_snaps.begin(), g_snaps.end(), [&](const Snap& x) { return x.npc != npc; }), g_snaps.end());
     std::set<uint32_t> masks;
     for (const auto& x : g_snaps) masks.insert(x.mask);
     if (masks.size() < 2) return;
@@ -472,7 +528,7 @@ const size_t kRegLen[5] = {0x2000, 0x1000, 0x1000, 0x200, 0x4000};
 }  // namespace
 
 void DummyProbeFrame() {
-    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 8) return;
+    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 12) return;
     for (const TrackedChr& t : TrackerList()) {
         if (!t.chr || t.distance > 6.f || t.boneCount < 20) continue;
         // once per NpcParam row: enemies of one model with different weapons have different rows
@@ -492,6 +548,13 @@ void DummyProbeFrame() {
             ervr::SafeRead((void*)(item + 0x650), &dm, 8);
             const uint32_t mask = DumpMeshMask(t.chr, item, fl, t.npcId);
             DumpMeshTable(fl, t.npcId, paramId, mask);
+            static std::set<int> matDone;   // the material names are per model
+            if (matDone.insert(t.npcId).second) {
+                const uintptr_t roots[4] = {fl, item, mi, res};
+                const char* const rn[4] = {"flverdata", "item", "modelins", "chrres"};
+                DumpMaterialNames(t.npcId, paramId, roots, rn, 4);
+            }
+            SnapAndDiff(t.chr, mi, item, fl, paramId, mask, t.npcId);
         }
         return;   // one per frame
     }
