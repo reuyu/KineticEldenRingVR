@@ -169,7 +169,8 @@ struct Rig {
     double simTime = 0;
     Impact impacts[kMaxImpacts]; int nImpacts = 0;
     PxD6Joint* embed = nullptr; int embedSlot = -1; uint32_t embedKey = 0; double embedSince = 0;
-    float embedBack = 0.02f;                     // m back along the way in (past the entry) before it comes free
+    float embedBack = 0.02f;
+    float embedPullMax = 0.f;                    // largest pull of a stuck blade on its part (N), for the 5 s log                     // m back along the way in (past the entry) before it comes free
     // A slash going into a part (TendCut): the part lets the blade through while it resists; out the other side is a
     // cut, slowed below BodyStickSpeed still inside is stuck.
     bool cutting[kMaxParts]{}, cutInside[kMaxParts]{};
@@ -1031,6 +1032,21 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
                 }
                 continue;
             }
+            if (k == r.embedSlot && r.embed) {
+                // Your blade stuck in it: what the joint holding it pulls the part with (never more than your arm's
+                // force) sways its upper body or swings its arm like a blow would, as long as it stays in.
+                PxVec3 f(0.f), tq(0.f);
+                r.embed->getConstraint()->getForce(f, tq);
+                PxVec3 J = f * p.dt;
+                const float jm = J.magnitude(), jArm = std::fmax(p.force, 1.f) * p.dt;
+                if (jm > jArm && jm > 0.f) J *= jArm / jm;
+                const PxVec3 pt = r.enemy[k]->getGlobalPose().transform(r.embed->getLocalPose(PxJointActorIndex::eACTOR0).p);
+                if (J.magnitudeSquared() > 0.f) {
+                    ContactImpulse(r.slotKey[k], origin + w2p.Rotate(ervr::Vec3{pt.x, pt.y, pt.z} * scale), w2p.Rotate(ervr::Vec3{J.x, J.y, J.z}));
+                    r.embedPullMax = std::fmax(r.embedPullMax, jm / std::fmax(p.dt, 1e-3f));
+                }
+                continue;
+            }
             if (a.weight <= 0.f) continue;
             const PxVec3 pt = a.moment * (1.f / a.weight);
             PxVec3 J = a.impulse;
@@ -1099,11 +1115,11 @@ bool SwordRigStep(int h, ervr::Vec3& pos, ervr::Quat& q, float dt, float weight,
     if (r.statSince == 0) r.statSince = now;
     if (now - r.statSince >= 5.0) {
         if (c.physicsSwordLog && r.statN > 0)
-            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s) (touch sub-steps: upper arm %d, forearm %d, weapon %d, torso %d, head %d, thigh %d, calf %d, shoulders/hips %d); snapped back %d; simulation %.2f ms per step",
+            LOGI("[phys] sword %s: %.1f kg (weight %.1f), arm %.0f N / %.0f N*m (STR %d%s), load %.2f -> overshoot cap %.0f deg, lag avg %.1f cm max %.1f cm, angle avg %.1f max %.1f deg, capped %d/%d sub-steps, roll removed max %.0f deg, enemy contacts %d, swing stamina spent %.0f, arm strength min x%.2f (tired); body: cut %d, stuck %d, pierced %d, glanced %d, largest blow %.0f J, stuck blade pulled its part with up to %.0f N; parries %d, arm pushes %d, arm hits %d, game strikes held back %d frame(s); enemy weapon held off %d frame(s) (largest %.0f cm off its path); blade on a body part %d sub-step(s) (touch sub-steps: upper arm %d, forearm %d, weapon %d, torso %d, head %d, thigh %d, calf %d, shoulders/hips %d); snapped back %d; simulation %.2f ms per step",
                  h == 1 ? "R" : "L", r.lastMass, weight, r.lastForce, r.lastTorque, str, strength > 1.01f ? ", two hands" : "", r.lastLoad, r.lastCapDeg,
-                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.kindTouch[0], r.kindTouch[1], r.kindTouch[2], r.kindTouch[3], r.kindTouch[4], r.kindTouch[5], r.kindTouch[6], r.kindTouch[7], r.snaps, r.stepN ? r.stepMs / r.stepN : 0.f);
+                 100.f * r.lagSum / r.statN, 100.f * r.lagMax, r.angSum / r.statN, r.angMax, r.capHits, r.subSteps, r.twistMax, r.contacts, g_stamSpent, g_tiredMin, r.cuts, r.sticks, r.pierces, r.glances, r.energyMax, r.embedPullMax, r.parries, r.armPushes, r.armHits, g_held[h].exchange(0), r.wHeld, 100.f * r.wDevMax, r.bodyTouch, r.kindTouch[0], r.kindTouch[1], r.kindTouch[2], r.kindTouch[3], r.kindTouch[4], r.kindTouch[5], r.kindTouch[6], r.kindTouch[7], r.snaps, r.stepN ? r.stepMs / r.stepN : 0.f);
         r.impactLogN = 0;
-        r.parries = r.armPushes = r.armHits = 0; r.wHeld = 0; r.wDevMax = 0.f; r.snaps = 0; r.bodyTouch = 0; for (int& t : r.kindTouch) t = 0; r.stepMs = 0.f; r.stepN = 0;
+        r.parries = r.armPushes = r.armHits = 0; r.embedPullMax = 0.f; r.wHeld = 0; r.wDevMax = 0.f; r.snaps = 0; r.bodyTouch = 0; for (int& t : r.kindTouch) t = 0; r.stepMs = 0.f; r.stepN = 0;
         r.statSince = now; r.lagSum = r.lagMax = r.angSum = r.angMax = 0; r.statN = 0; r.capHits = r.subSteps = 0; r.twistMax = 0; r.contacts = 0; r.cuts = r.sticks = r.pierces = r.glances = 0; r.energyMax = 0;
         if (h == 1) { g_stamSpent = 0.f; g_tiredMin = 1.f; }
     }
