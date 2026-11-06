@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -527,8 +528,60 @@ void SnapAndDiff(uint8_t* chr, uintptr_t mi, uintptr_t item, uintptr_t fl, int p
 }
 }  // namespace
 
+// Test of a reading (not used by the game logic): each weapon mesh's int16 at mesh entry +0x32 as "group*10 + part"
+// against the mask the enemy holds at run time (CSChrModelIns+0x138, the NpcParam modelDispMask copy; TAE
+// ChangeChrDrawMask events can change it, e.g. drawing a weapon). Logged per enemy, and again when its mask changes.
+static void MaskReadingFrame() {
+    static std::map<uintptr_t, uint32_t> last;
+    static int lines = 0;
+    if (lines > 400) return;
+    for (const TrackedChr& t : TrackerList()) {
+        if (!t.chr || t.distance > 8.f || t.boneCount < 20) continue;
+        uintptr_t mi = 0, item = 0, fl = 0, mt = 0, names = 0;
+        uint32_t mask = 0; int32_t paramId = -1, n = 0;
+        ervr::SafeRead(t.chr + 0x60, &paramId, 4);
+        ervr::SafeRead(t.chr + 0x50, &mi, 8);
+        if (!PtrLike(mi) || !ervr::SafeRead((void*)(mi + 0x138), &mask, 4)) continue;
+        auto it = last.find((uintptr_t)t.chr);
+        if (it != last.end() && it->second == mask) continue;
+        const bool changed = it != last.end();
+        const uint32_t was = changed ? it->second : 0;
+        last[(uintptr_t)t.chr] = mask;
+        ervr::SafeRead((void*)(mi + 0x10), &item, 8);
+        if (PtrLike(item)) ervr::SafeRead((void*)(item + 0x68), &fl, 8);
+        if (!PtrLike(fl)) continue;
+        ervr::SafeRead((void*)(fl + 0x18), &n, 4);
+        ervr::SafeRead((void*)(fl + 0x30), &names, 8);
+        ervr::SafeRead((void*)(fl + 0x88), &mt, 8);
+        if (n < 1 || n > 4000 || !PtrLike(names) || !PtrLike(mt)) continue;
+        static std::vector<uint16_t> w(0x8000);
+        size_t got = 0;
+        for (size_t c = 0x8000; c >= 0x400; c /= 2) if (ervr::SafeRead((void*)names, w.data(), c * 2)) { got = c; break; }
+        std::vector<std::string> nm;
+        for (size_t k = 0; (int)nm.size() < n && k < got;) { std::string x; while (k < got && w[k]) { x += (char)(w[k] < 128 ? w[k] : '?'); ++k; } ++k; nm.push_back(x); }
+        std::string shown, hidden;
+        for (int i = 0; i < 400; ++i) {
+            uint8_t e[0x40];
+            if (!ervr::SafeRead((void*)(mt + (uintptr_t)i * 0x40), e, sizeof(e))) break;
+            int16_t node; uint16_t grp; std::memcpy(&node, e + 0x36, 2); std::memcpy(&grp, e + 0x32, 2);
+            if (node < 0 || node >= n) break;
+            if (node >= (int)nm.size() || nm[node].find("Weapon") == std::string::npos) continue;
+            const int g = grp / 10;
+            char b[96]; snprintf(b, sizeof(b), " %s(%u->bit %d, sec %02x)", nm[node].c_str(), grp, g, e[0x34]);
+            ((g < 32 && (mask >> g) & 1) ? shown : hidden) += b;
+        }
+        ++lines;
+        char wasS[32] = "";
+        if (changed) snprintf(wasS, sizeof(wasS), " (was 0x%08x)", was);
+        LOGI("[mask] chr %p param %d dist %.1f m: mask 0x%08x%s | weapon meshes whose bit is set:%s | not set:%s", (void*)t.chr, paramId, t.distance,
+             mask, wasS, shown.empty() ? " none" : shown.c_str(), hidden.empty() ? " none" : hidden.c_str());
+    }
+}
+
 void DummyProbeFrame() {
-    if (!ervr::Cfg().physicsDummyProbe || g_dmyDone.size() >= 12) return;
+    if (!ervr::Cfg().physicsDummyProbe) return;
+    MaskReadingFrame();
+    if (g_dmyDone.size() >= 12) return;
     for (const TrackedChr& t : TrackerList()) {
         if (!t.chr || t.distance > 6.f || t.boneCount < 20) continue;
         // once per NpcParam row: enemies of one model with different weapons have different rows
