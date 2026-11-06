@@ -168,6 +168,53 @@ inline std::string iniSet(std::string_view text, std::string_view section, std::
     return out;
 }
 
+// Kinetic: carry a section's new settings into the player's ERVR.ini on install/update, never changing a value they
+// have. A section the player's file lacks is copied whole from `from` (with its comments); otherwise each key of it
+// that the player's file lacks is added with the shipped value. Returns the player's text unchanged when nothing is missing.
+inline std::string iniAddMissing(std::string_view text, std::string_view from, std::string_view section) {
+    // The section's lines in `from`: its header up to the next header (or the end).
+    size_t at = detail::afterBom(from), blockStart = std::string_view::npos, blockEnd = from.size();
+    detail::Line line;
+    std::vector<std::pair<std::string, std::string>> keys;
+    while (detail::nextLine(from, at, line)) {
+        const std::string_view content = from.substr(line.start, line.end - line.start);
+        if (auto name = detail::section(content)) {
+            if (blockStart != std::string_view::npos) { blockEnd = line.start; break; }
+            if (sameText(*name, section)) blockStart = line.start;
+            continue;
+        }
+        if (blockStart == std::string_view::npos) continue;
+        if (auto p = detail::pair(content)) keys.emplace_back(std::string(p->key), std::string(p->value));
+    }
+    if (blockStart == std::string_view::npos) return std::string(text);
+    bool has = false;
+    {
+        size_t t = detail::afterBom(text);
+        while (detail::nextLine(text, t, line))
+            if (auto name = detail::section(text.substr(line.start, line.end - line.start)); name && sameText(*name, section)) { has = true; break; }
+    }
+    if (!has) {
+        const std::string eol = text.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
+        std::string block(from.substr(blockStart, blockEnd - blockStart));
+        while (!block.empty() && (block.back() == '\n' || block.back() == '\r')) block.pop_back();
+        // The block in the player's line ends.
+        std::string converted;
+        for (size_t i = 0; i < block.size(); ++i) {
+            if (block[i] == '\r') continue;
+            if (block[i] == '\n') converted += eol; else converted += block[i];
+        }
+        std::string out(text);
+        if (!out.empty() && out.back() != '\n') out += eol;
+        if (!out.empty()) out += eol;
+        out += converted + eol;
+        return out;
+    }
+    std::string out(text);
+    for (const auto& [key, value] : keys)
+        if (!iniGet(out, section, key)) out = iniSet(out, section, key, value);
+    return out;
+}
+
 // ---- ELDEN RING's GraphicsConfig.xml -----------------------------------------------------------------------
 // The game's own graphics settings, %APPDATA%\EldenRing\GraphicsConfig.xml: UTF-16LE text (a byte order mark, if
 // any, is part of it), one <Tag>VALUE</Tag> a setting. The game reads it as it starts and writes its settings back

@@ -7,6 +7,7 @@
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
 #include "phys_layer.h"
+#include "sword_rig.h"
 #include "game_version.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
@@ -673,6 +674,9 @@ bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.
 struct BladeSample { bool valid = false; Vec3 grip{}, tip{}; double stamp = 0; };
 std::mutex g_bladeMtx;
 BladeSample g_blade[2];
+// Kinetic: tracking frame -> world for each hand's simulated grip (GameERPlayToWorld), under g_bladeMtx.
+struct PlayToWorld { bool valid = false; Vec3 origin{}; Quat rot{}; float scale = 1.f; double stamp = 0; };
+PlayToWorld g_playToWorld[2];
 BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
@@ -1042,7 +1046,17 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dt : 0.f, shaftAxis);
     const float reach = CombatHandReach(h);
     const Vec3 previousTip = s.pos * c.handScale + s.q.Rotate(shaftAxis) * reach;
-    if (c.kineticInertia && goodDt) {
+    // Kinetic M2: the B&S-style sword. The grip itself is simulated (mass, limited arm strength), so it
+    // moves the position as well as the angle; when it is off or unavailable ERVR's angular lag runs as before.
+    bool simulated = false;
+    if (goodDt && kinetic::SwordRigActive()) {
+        const bool twoArms = CombatTwoHandWeaponHand() == h;
+        simulated = kinetic::SwordRigStep(h, p, q, dt, CombatHandWeight(h), reach, CombatHandCom(h),
+                                          twoArms ? c.inertiaTwoHandTorque : 1.f, shaftAxis);
+    } else if (!goodDt) {
+        kinetic::SwordRigReset(h);
+    }
+    if (!simulated && c.kineticInertia && goodDt) {
         const bool twoArms = CombatTwoHandWeaponHand() == h;
         q = StepWeaponOrientation(s.q, q, shaftAxis, dt, CombatHandWeight(h), reach,
                                   CombatHandCom(h), c.kineticAccelWeight, c.inertiaComRef,
@@ -1088,6 +1102,7 @@ struct FrameInfo {
     float headYaw = 0;   // HMD yaw relative to the tracking origin (game convention, positive = right)
     float bodyYaw = 0;   // absolute yaw the body is driven toward: facing, torso twist, elbow poles
     Vec3  handP[2]; Quat handQ[2]; bool handValid[2]{};
+    Quat  rawQ[2];       // the controller as tracked, before the inertial weapon (for the bent-weapon log)
 };
 
 // ---------------------------------------------------------------- cast aim
@@ -1403,6 +1418,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
+            f.rawQ[h] = q;
             float handRotX = c.handRotOffX;
             DebugKeysHandRotX(&handRotX);
             const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
@@ -2342,6 +2358,23 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
                 const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
                 tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
                                                                cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
+                // Bent-weapon log: how far the drawn weapon (inertial / physics) and the pinned hand are from your
+                // real controllers. Logged when either stays over 20 degrees for 0.3 s (at most 2 per second).
+                if (FramePumpCurrentPass() != 2) {
+                    auto ang = [](Quat a, Quat b) { const Quat d = (a.Normalized().Conj() * b.Normalized()).Normalized(); return 2.f * std::acos(std::fmin(std::fabs(d.w), 1.f)) * 57.2958f; };
+                    const float wepOff = ang(f.handQ[wep], f.rawQ[wep]);
+                    const float pinOff = ang(cq, (baseQ * f.rawQ[pin] * calib).Normalized());
+                    static double bentSince = 0, lastLog = 0;
+                    const double now = NowSec();
+                    if (wepOff > 20.f || pinOff > 20.f) {
+                        if (bentSince == 0) bentSince = now;
+                        if (now - bentSince > 0.3 && now - lastLog > 0.5) {
+                            lastLog = now;
+                            LOGI("[bent] two-hand: drawn weapon %.0f deg off your %s controller, pinned %s hand %.0f deg off your %s controller, for %.1f s",
+                                 wepOff, wep == 1 ? "right" : "left", pin == 1 ? "right" : "left", pinOff, pin == 1 ? "right" : "left", now - bentSince);
+                        }
+                    } else bentSince = 0;
+                }
             }
         }
     }
@@ -2362,6 +2395,12 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             if (!tok[h]) continue;
             const Vec3 axis = c.twoHandAxis != "forward" ? tcu[h] : tcf[h];
             g_blade[h].grip = tp[h]; g_blade[h].tip = tp[h] + axis * CombatHandReach(h); g_blade[h].stamp = NowSec();
+            // tp = anchor + baseQ * (handP * scale) + offsets, and handP is the simulated grip plus a constant:
+            // whatever is left over is the origin of the grip frame in the world.
+            Vec3 grip; { std::lock_guard<std::mutex> li(g_inertiaMtx); grip = g_inertia[h].pos; }
+            PlayToWorld& m = g_playToWorld[h];
+            m.rot = baseQ; m.scale = c.handScale; m.origin = tp[h] - baseQ.Rotate(grip * c.handScale);
+            m.valid = g_inertia[h].init; m.stamp = g_blade[h].stamp;
         }
     }
     // Publish the entire solved root in the native model frame. Mixing a render-frame
@@ -2842,14 +2881,18 @@ uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
     __try { RewriteIfClobbered(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     return rv;
 }
+void KineticModelPosGuarded(void* ctrl, bool post);
 void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     CountPass(g_cntModelPos);
+    // Kinetic: enemy bone overrides go in here, before the renderer consumes this character's pose.
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl, false);
     // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
     // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
     // The upper-body layer ran just before us; put ours back first, then let the original consume it.
     bool act = !g_tripped && FirstPersonActive() && (Cfg().handTracking || g_moveRiding.load());
     if (act) { __try { UpdateChrModelPosBody(ctrl, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; act = false; } }
     g_origUpdModelPos(ctrl);
+    if (kinetic::PhysEnabled() && !GameERWorldDying()) KineticModelPosGuarded(ctrl, true);
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
 }
 void HookCameraStepImpl(void* a, void* b);
@@ -2989,6 +3032,10 @@ void KineticFrameGuarded(uint8_t* player, int pass) {
     __try { kinetic::PhysGameFrame(player, pass); }
     __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
 }
+void KineticModelPosGuarded(void* ctrl, bool post) {
+    __try { if (post) kinetic::PhysAfterModelPos(ctrl); else kinetic::PhysBeforeModelPos(ctrl); }
+    __except (KineticSehFilter(GetExceptionCode())) { kinetic::PhysTrip(); }
+}
 void HkHandler(MidHookRegs*, void*) {
     InterlockedIncrement(&g_hkCalls);
     if (g_tripped || !Cfg().fpEnabled) return;
@@ -3044,6 +3091,29 @@ int GameERPlayerLevel() {
     return level;
 }
 
+// PlayerGameData stats are vigor, mind, endurance, strength... from +0x3C (see SetAllStats below).
+int GameERChrPoseBuffers(uint8_t* chr, float* out[2]) {
+    int n = 0;
+    uint8_t* beh = chr ? Behavior(chr) : nullptr; if (!beh) return 0;
+    for (size_t o : { off::Beh_Unk10, off::Beh_HkbContext }) {
+        uint8_t* ctx = Deref(beh + o); if (!ctx) continue;
+        uint8_t* hkb = Deref(ctx + off::Ctx_HkbCharacter); if (!hkb) continue;
+        Skeleton tmp; tmp.hkb = hkb;
+        float* pose = (float*)tmp.LivePose(); if (!pose) continue;
+        if (n == 1 && out[0] == pose) continue;
+        out[n++] = pose;
+    }
+    return n;
+}
+
+uint8_t* GameERChrCtrl(uint8_t* chr) { return chr ? Deref(chr + off::Chr_ChrCtrl) : nullptr; }
+
+int GameERPlayerStrength() {
+    uint8_t* pgd = GameERPlayerGameData(); if (!pgd) return -1;
+    int str = -1; SafeRead(pgd + 0x48, &str, 4);
+    return str;
+}
+
 uint8_t* GameERChrHkbCharacter(uint8_t* chr) { return chr ? FindHkbCharacter(chr) : nullptr; }
 
 bool GameERHkbSkeleton(uint8_t* hkb, std::vector<std::string>& names, std::vector<int16_t>& parents) {
@@ -3074,6 +3144,29 @@ uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
 uint8_t* GameERMainPlayer() { return MainPlayer(); }
 
 bool GameERRiding() { return g_moveActive.load() && g_moveRiding.load(); }
+
+bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot) {
+    Vec3 p; Quat q;
+    if (!chr || !pos || !rot || !ModelMatrixRoot(chr, p, q)) return false;
+    *pos = p; *rot = q;
+    return true;
+}
+
+bool GameEREyeWorld(Vec3* out) {
+    const Vec3 p = g_lastWrittenPos;
+    if (!out || (p.x == 0.f && p.y == 0.f && p.z == 0.f)) return false;
+    *out = p;
+    return true;
+}
+
+bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale) {
+    if (hand != HandLeft && hand != HandRight) return false;
+    std::lock_guard<std::mutex> g(g_bladeMtx);
+    const PlayToWorld& m = g_playToWorld[hand];
+    if (!m.valid || NowSec() - m.stamp > 0.1) return false;
+    *origin = m.origin; *rot = m.rot; *scale = m.scale;
+    return true;
+}
 
 bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip) {
     if (hand != HandLeft && hand != HandRight) return false;

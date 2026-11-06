@@ -53,6 +53,7 @@
 #include "rtti.h"
 #include "belt.h"
 #include "weapon_wheel.h"
+#include "sword_rig.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -1571,6 +1572,10 @@ void GameFrameBody(uint8_t* player) {
         }
         if (!c.kineticContinuous && !k.first && nowS < s_hitPauseUntil[h]) { anyStrike = true; continue; }   // paused: instance kept, no sweep
         if (h == HandLeft && leftShield) { RestoreAtk(h); continue; }   // the shield blocks, it does not strike
+        // Strike gate (Kinetic): the game's collision hits whatever hurtbox the blade sweeps, so a blade laid on an
+        // enemy's sword or arm would count as a hit. While the simulated blade is at an enemy without having really
+        // struck (cut, stuck, pierced, a hard arm hit), this frame sweeps nothing.
+        if (kinetic::SwordRigHoldStrike(h)) { RestoreAtk(h); anyStrike = true; continue; }
         Template t;
         {
             std::lock_guard<std::mutex> g(g_mtx);
@@ -1644,6 +1649,7 @@ void GameFrameBody(uint8_t* player) {
                     if (mult > remain) mult = remain;
                 }
             } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
+            mult *= kinetic::SwordRigStrikeScale(h);   // a glance lands weakly (GlanceDamage)
             if (r) {
                 // After the first landed hit-frame the strike keeps its damage but loses its hit
                 // reaction (dmg_level/hitstop/poise -> 0): one flinch per swing, no stunlock.
@@ -2267,6 +2273,29 @@ bool CombatTwoHandGrip(int hand, bool* holding) {
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
 int CombatTwoHandWeaponHand() { const int style = g_armStyleShared.load(); return TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : -1; }
+int CombatPlayerStamina(int* maxOut) {
+    uint8_t* player = GameERMainPlayer();
+    if (!player) return -1;
+    return ReadStamina(player, maxOut);
+}
+bool CombatSetPlayerStamina(int value) {
+    uint8_t* player = GameERMainPlayer();
+    return player && WriteStamina(player, value);
+}
+int CombatPlayerHp(int* maxOut) {
+    uint8_t* player = GameERMainPlayer();
+    return player ? ChrHp(player, maxOut) : -1;
+}
+bool CombatSetPlayerHp(int value) {
+    uint8_t* player = GameERMainPlayer(); if (!player) return false;
+    uint8_t* mods = Deref(player + Chr_Modules); uint8_t* data = mods ? Deref(mods + Mod_Data) : nullptr;
+    if (!data) return false;
+    int maxHp = -1; SafeRead(data + Data_MaxHp, &maxHp, 4);
+    if (maxHp > 0 && value > maxHp) value = maxHp;
+    if (value < 1) value = 1;
+    return SafeWrite(data + Data_Hp, &value, 4);
+}
+bool CombatLeftIsShield() { return g_wep[HandLeft].valid && g_wep[HandLeft].isShield && g_armStyle != 3; }
 float CombatHandReach(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float r = g_wepReach[hand].load();

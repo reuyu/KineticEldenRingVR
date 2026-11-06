@@ -59,6 +59,16 @@ int CombatTwoHandWeaponHand();
 // and how far out along it the mass sits (rotational inertia about the grip goes with its square).
 float CombatHandReach(int hand);
 float CombatHandCom(int hand);
+// The main player's stamina (CSChrDataModule) and its maximum; -1 when unreadable. Game thread.
+int CombatPlayerStamina(int* maxOut);
+// Sets the main player's stamina (clamped at 0). Game thread.
+bool CombatSetPlayerStamina(int value);
+// The main player's HP and its maximum; -1 when unreadable. Game thread.
+int CombatPlayerHp(int* maxOut);
+// Sets the main player's HP (clamped to 1..max). Game thread.
+bool CombatSetPlayerHp(int value);
+// A shield in the left hand (any [Combat] Block setting), not two-handing the right weapon. Game thread.
+bool CombatLeftIsShield();
 // Cast aim: ranged spells / skills / bows aim where the CASTING HAND points. The pad worker feeds every
 // button the GAME is actually handed (final mask, VP_LT/VP_RT for the triggers; 0 while a menu owns the
 // pad) so the pressing hand becomes the aim hand for CastAimSeconds. Call once per pad update.

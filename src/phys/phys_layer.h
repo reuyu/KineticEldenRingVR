@@ -20,6 +20,12 @@ bool PhysEnabled();
 // Called inside an SEH guard; never while the world is being torn down.
 void PhysGameFrame(uint8_t* player, int pass);
 
+// Any thread, at a character's model-pos update (the point where its pose is handed to the renderer), before
+// the game's own code runs. ctrl = that character's ChrCtrl. Called inside an SEH guard.
+void PhysBeforeModelPos(void* ctrl);
+// The same, after the game's own model-pos code has run (a second chance when it re-animated the bone inside).
+void PhysAfterModelPos(void* ctrl);
+
 // The guard caught a fault: the layer stays off until the game restarts.
 void PhysTrip();
 

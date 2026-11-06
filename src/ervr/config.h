@@ -793,9 +793,100 @@ struct Config {
     // M1 spike (S1): overwrite one bone of the nearest character, to see whether the game draws it and whether
     // its attack hitboxes follow. Empty = off. The bone rotates by TestDeg about its own local TestAxis (x|y|z).
     std::string physicsTestBone;
-    std::string physicsTestAxis = "x";
+    std::string physicsTestAxis = "z";   // x runs along the bone (a twist); z swings it
     float physicsTestDeg = 90.f;
     float physicsTestRadius = 4.f;
+    // M2: B&S-style sword (PhysX). The hand+weapon is one rigid body pulled toward the controller by a
+    // force/torque-limited joint (src/phys/sword_rig.*); replaces [Combat] Inertia while on.
+    bool  physicsSword = true;
+    float physicsSwordKgPerWeight = 0.3f;   // kg of simulated mass per ER weight unit
+    float physicsSwordHandKg = 1.0f;        // the hand itself
+    float physicsSwordForceBase = 300.f;    // N, + ForcePerStr * STR: how hard the arm can pull the grip
+    float physicsSwordForcePerStr = 10.f;
+    float physicsSwordTorqueBase = 60.f;    // N*m, + TorquePerStr * STR: how hard the wrist can turn the blade
+    float physicsSwordTorquePerStr = 2.5f;
+    float physicsSwordLinearSpring = 4000.f;  // N/m
+    float physicsSwordLinearDamper = 120.f;   // N*s/m
+    float physicsSwordAngularSpring = 1500.f;  // N*m/rad
+    float physicsSwordAngularDamper = 60.f;   // N*m*s/rad
+    // How far the blade's aim may trail the wrist (no runaway spins), set by how heavy the weapon is for this arm:
+    // load = the weapon's gravity torque about the grip / the wrist torque (STR, two hands). Light for you -> MinAngle
+    // (precise), at or past SwordLoadForMax -> MaxAngle (it swings you).
+    float physicsSwordMinAngleDeg = 30.f;   // 35 deg flat felt right (play test 2) for a weight-9 sword at STR 16
+    float physicsSwordMaxAngleDeg = 60.f;
+    float physicsSwordLoadForMax = 0.6f;
+    float physicsSwordSnapDistance = 0.6f;    // m: further than this from the controller, the grip snaps back
+    bool  physicsSwordLog = true;             // lag summary every 5 s
+    // M2.5: the blade against enemy arms and weapons (src/phys/enemy_contact.*). Enemy upper arms, forearms and
+    // right-hand weapons within ContactRadius become solid capsules for the simulated blade; each contact's impulse
+    // swings that enemy arm about its shoulder (inertia, stiffness = how hard it holds its pose), and it springs back.
+    bool  physicsContact = true;
+    float physicsContactRadius = 4.5f;          // m
+    float physicsEnemyArmInertia = 0.3f;        // kg*m^2 about the shoulder (arm + weapon)
+    float physicsEnemyArmStiffness = 20.f;     // N*m/rad pulling the arm back into its animation
+    float physicsEnemyArmDamping = 1.0f;       // fraction of critical damping
+    float physicsEnemyArmMaxDeg = 45.f;        // the swing never exceeds this
+    std::string physicsEnemyWeaponBone = "R_Weapon_Sword";   // the bone the right-hand weapon hangs off
+    std::string physicsEnemyWeaponAxis = "auto"; // its local axis along the blade (x|y|z, - to flip; auto = learned from the hits you take)
+    float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
+    // Per model (ChrIns+0x64, e.g. 4311): which weapon nodes of its model it holds, "4311:R_Weapon_Spear,L_Weapon_Shield;..."
+    // Their shape is the mesh's box from the model data. A model not listed uses EnemyWeaponBone.
+    std::string physicsEnemyWeapons = "4311:1=R_Weapon_Sword,4=R_Weapon_Spear,0=R_Weapon_Warpick,10=L_Weapon_Shield,11=L_Weapon_Shield_big";
+    float physicsEnemyShieldKg = 5.f;          // an enemy shield as a physics body
+    float physicsEnemyShieldForce = 200.f;     // N its arm holds it with
+    float physicsEnemyShieldTorque = 60.f;     // N*m about its grip
+    float physicsEnemyWeaponKg = 3.f;          // the enemy weapon as a physics body
+    float physicsEnemyArmForce = 200.f;        // N the enemy's arm drives its weapon with (yours: SwordForce*)
+    float physicsEnemyArmTorque = 60.f;        // N*m about its grip
+    // Upper-body sway: blows on the torso and head turn the upper body about the pelvis and it springs back.
+    bool  physicsTorsoSway = true;
+    float physicsTorsoInertia = 4.f;           // kg*m^2 about the pelvis
+    float physicsTorsoStiffness = 200.f;       // N*m/rad
+    float physicsTorsoDamping = 1.0f;
+    float physicsTorsoMaxDeg = 20.f;
+    bool  physicsContactLog = true;
+    bool  physicsHurtboxProbe = false;
+    bool  physicsDummyProbe = false;           // log where enemy models keep their weapon dummy points ("[dmy]")          // log the game's own body shapes of nearby enemies ("[hurt]")
+    // The body (torso, head, thighs, calves): a blow's energy at contact (0.5 m v^2 of the blade, x STR/16 scaling)
+    // decides it. Slash: >= BodyCutEnergy cuts through, >= BodyStickEnergy sticks in, less glances off. Thrust (tip
+    // first): >= BodyPierceEnergy goes in and can be pushed deeper against BodyFriction, and pulled back out.
+    bool  physicsBodyContact = true;
+    bool  physicsGameShapes = true;           // the enemy body is the game's own ragdoll capsules (hand-made ones if unreadable)
+    float physicsBodyScale = 1.0f;            // thickness of the enemy body capsules (1 = an armoured soldier)
+    float physicsBodyCutEnergy = 110.f;       // J (with the mass the blade hits with at the point)
+    float physicsBodyStickEnergy = 40.f;      // J: weaker glances off
+    float physicsBodyPierceEnergy = 80.f;     // J
+    // Strike gate: the game's own attack collision (ERVR's strikes) only counts where the simulated blade really
+    // struck: a body part cut, stuck or pierced, or an arm hit with ArmHitEnergy or more. A blade on an enemy
+    // weapon or arm (a parry, a push), a glance, or a blade at an enemy that has not struck yet deals no damage.
+    bool  physicsGateStrikes = true;
+    float physicsArmHitEnergy = 110.f;        // J
+    float physicsBodyFriction = 2500.f;       // N*s/m resisting a blade sliding in or out (pulled out slowly)
+    float physicsBodyStickDepth = 0.08f;      // (unused since the slash is resisted inside the part)
+    float physicsBodyCutResistance = 1300.f;  // N a part resists a blade going through it
+    float physicsBodyStickSpeed = 1.0f;       // m/s: slower than this still inside, the blade is stuck
+    float physicsGlanceDamage = 0.1f;         // share of a hit a glance deals
+    bool physicsBodyStickAll = false;         // test: every blow on a body part sticks where it lands
+    float physicsBodyStickAllBack = 0.10f;    // test: m it must be pulled back out the way it went in
+    bool physicsSwingOwnOnly = true;          // a blow's speed: your hand's own motion against the part's motion in the world
+                                              // (false: also the carry when the game moves you - knock-back, lock-on turning)
+    // Hit judge (src/phys/hit_judge.*): an enemy blow hurts only if its weapon reached your body; a shield always
+    // holds and costs stamina instead. Damage the game deals with no enemy weapon near you is left alone.
+    bool  physicsHitJudge = true;
+    float physicsHitWindow = 0.35f;            // s of weapon history a hit is judged on
+    float physicsBodyRadius = 0.22f;           // m, your body capsule (feet to eyes)
+    float physicsShieldRadius = 0.35f;         // m, the shield as a sphere at the left grip
+    float physicsShieldStaminaPerDamage = 1.0f;// stamina a shield block costs per HP of the blow
+    float physicsEnemyWeaponRefSpeed = 6.f;    // m/s: a weapon this fast at contact does full damage
+    float physicsGrazeMin = 0.15f;             // the least damage fraction a touch does
+    // Swing stamina: swinging itself costs stamina (not only a landed hit), and a tired arm is weak - the
+    // sword's arm force and wrist torque drop, so the blade gets sluggish and hard to accelerate.
+    bool  physicsSwingStamina = true;
+    float physicsSwingStaminaSpeed = 5.f;       // m/s blade-tip speed above which a swing costs stamina
+    float physicsSwingStaminaPerSec = 5.5f;    // per second at 8 m/s tip speed, x (0.5 + weapon kg / 3), x (speed/8)^2
+    float physicsSwingRegenDelay = 1.2f;       // s after swing stamina is spent before the game may regenerate it
+    float physicsTiredBelow = 0.25f;           // stamina fraction below which the arm weakens
+    float physicsTiredStrength = 0.4f;         // arm strength multiplier at 0 stamina
 
     void Load(const std::wstring& iniPath);
 };

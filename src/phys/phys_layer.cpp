@@ -2,15 +2,21 @@
 
 #include "chr_tracker.h"
 #include "config.h"
+#include "enemy_contact.h"
 #include "game_er.h"
+#include "hit_judge.h"
+#include "hurtbox_probe.h"
 #include "game_memory.h"
 #include "log.h"
+#include "pose_override.h"
+#include "sword_rig.h"
 #include "vrmath.h"
 
 #include <windows.h>
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <mutex>
 
 namespace kinetic {
 
@@ -20,13 +26,10 @@ std::atomic<bool> g_tripped{false};
 bool g_initialized = false;
 double g_lastTrack = 0;
 
-// S1 bone-override test state: what we wrote last, so repeated hook calls in one frame
-// rotate the animation's pose once instead of piling rotations on top of our own write.
+// S1 test target (PoseOverride does the writing).
+uint8_t* g_testChr = nullptr;
 uint8_t* g_testHkb = nullptr;
 int g_testBone = -1;
-float g_lastWritten[4] = {};
-float g_base[4] = {};
-bool g_haveWritten = false;
 double g_lastTestLog = 0;
 
 double NowSec() {
@@ -45,53 +48,52 @@ void Apply(const char* why) {
         LOGI("[phys] M1 spike: tracking within %.1f m, bone dump %s, test bone '%s' axis %s %.0f deg within %.1f m",
              c.physicsTrackRadius, c.physicsDumpBones ? "on" : "off", c.physicsTestBone.c_str(),
              c.physicsTestAxis.c_str(), c.physicsTestDeg, c.physicsTestRadius);
+        LOGI("[phys] Kinetic build %s: B&S-style sword %s, blade contact with enemies %s", ERVR_VERSION,
+             !KINETIC_HAS_PHYSX ? "NOT built in (no PhysX in this build)" : c.physicsSword ? "on" : "off (Sword=false)",
+             c.physicsContact ? "on" : "off");
+        if (c.physicsContact)
+            LOGI("[phys] contact: enemies within %.1f m; enemy arm inertia %.2f kg*m^2, stiffness %.0f N*m/rad, damping %.2f, swing max %.0f deg; weapon bone '%s' axis %s length %.2f m",
+                 c.physicsContactRadius, c.physicsEnemyArmInertia, c.physicsEnemyArmStiffness, c.physicsEnemyArmDamping,
+                 c.physicsEnemyArmMaxDeg, c.physicsEnemyWeaponBone.c_str(), c.physicsEnemyWeaponAxis.c_str(), c.physicsEnemyWeaponLength);
     }
     TrackerReset();
-    g_testHkb = nullptr; g_haveWritten = false;
+    ContactReset();
+    HitJudgeReset();
+    PoseOverrideClear();
+    g_testChr = nullptr; g_testHkb = nullptr; g_testBone = -1;
 }
 
 ervr::Vec3 TestAxis() {
     const std::string& a = ervr::Cfg().physicsTestAxis;
-    const char c = a.empty() ? 'x' : (char)std::tolower((unsigned char)a[0]);
-    return c == 'y' ? ervr::Vec3{0, 1, 0} : c == 'z' ? ervr::Vec3{0, 0, 1} : ervr::Vec3{1, 0, 0};
+    const char c = a.empty() ? 'z' : (char)std::tolower((unsigned char)a[0]);
+    return c == 'y' ? ervr::Vec3{0, 1, 0} : c == 'x' ? ervr::Vec3{1, 0, 0} : ervr::Vec3{0, 0, 1};
 }
 
-// M1.3: rotate one bone of the nearest tracked character by a fixed angle about a local axis, on top of
-// whatever the animation put there this frame. Both stereo passes, so both eyes show it.
-void TestBoneOverride() {
+// S1: rotate one bone of the nearest tracked character by a fixed angle about its local axis, on top of its
+// animation. Play test 4 (z axis) showed it: the soldier's arm swung back while idle.
+void DeclareTestBone() {
     const auto& c = ervr::Cfg();
-    if (c.physicsTestBone.empty()) { g_testHkb = nullptr; g_haveWritten = false; return; }
+    if (c.physicsTestBone.empty()) { g_testChr = nullptr; return; }
     const auto& list = TrackerList();
     const TrackedChr* target = nullptr;
     for (const auto& t : list) if (t.hkb && t.distance <= c.physicsTestRadius) { target = &t; break; }
-    if (!target) { g_testHkb = nullptr; g_haveWritten = false; return; }
-
+    // A little hysteresis so a target walking along the radius does not flicker in and out.
+    if (!target && g_testChr)
+        for (const auto& t : list) if (t.chr == g_testChr && t.hkb && t.distance <= c.physicsTestRadius + 1.f) { target = &t; break; }
+    if (!target) { g_testChr = nullptr; return; }
     const int bone = TrackerBoneIndex(target->hkb, c.physicsTestBone);
+    const double now = NowSec();
     if (bone < 0 || bone >= target->boneCount) {
-        const double now = NowSec();
+        g_testChr = nullptr;
         if (now - g_lastTestLog > 5.0) { g_lastTestLog = now; LOGW("[phys] test: npc %d has no bone '%s'", target->npcId, c.physicsTestBone.c_str()); }
         return;
     }
-    if (target->hkb != g_testHkb || bone != g_testBone) {
-        g_testHkb = target->hkb; g_testBone = bone; g_haveWritten = false;
+    if (target->hkb != g_testHkb || bone != g_testBone || target->chr != g_testChr) {
+        g_testChr = target->chr; g_testHkb = target->hkb; g_testBone = bone;
         LOGI("[phys] test: overriding '%s' (#%d) of npc %d at %.1f m", c.physicsTestBone.c_str(), bone, target->npcId, target->distance);
     }
-    float* pose = ervr::GameERHkbLivePose(target->hkb);
-    if (!pose) return;
-    float* q = pose + bone * 12 + 4;   // hkQsTransform {t[4], q[4], s[4]}
-    float cur[4];
-    if (!ervr::SafeRead(q, cur, sizeof(cur))) return;
-    // Our own write still in the buffer = the animation has not run since: rotate its pose, not ours.
-    const bool ours = g_haveWritten && cur[0] == g_lastWritten[0] && cur[1] == g_lastWritten[1] &&
-                      cur[2] == g_lastWritten[2] && cur[3] == g_lastWritten[3];
-    if (!ours) for (int i = 0; i < 4; ++i) g_base[i] = cur[i];
-    const ervr::Quat base{g_base[0], g_base[1], g_base[2], g_base[3]};
-    const ervr::Quat out = (base * ervr::Quat::AxisAngle(TestAxis(), c.physicsTestDeg * 3.14159265f / 180.f)).Normalized();
-    const float w[4] = {out.x, out.y, out.z, out.w};
-    if (ervr::SafeWrite(q, w, sizeof(w))) {
-        for (int i = 0; i < 4; ++i) g_lastWritten[i] = w[i];
-        g_haveWritten = true;
-    }
+    PoseOverrideAdd(target->chr, target->hkb, bone, ervr::Quat{},
+                    ervr::Quat::AxisAngle(TestAxis(), c.physicsTestDeg * 3.14159265f / 180.f));
 }
 }  // namespace
 
@@ -114,14 +116,35 @@ void PhysTrip() {
 
 void PhysGameFrame(uint8_t* player, int pass) {
     if (!g_enabled.load() || !player) return;
-    // The pose hook runs several times per rendered frame; the character list only needs one refresh per
-    // simulation frame, and never from the second eye's re-run.
+    // The pose hook runs several times per rendered frame; the character list and the overrides only need one
+    // rebuild per simulation frame, and never from the second eye's re-run. Writing happens on every call.
     const double now = NowSec();
     if (pass != 2 && now - g_lastTrack > 1.0 / 90.0) {
         g_lastTrack = now;
         TrackerUpdate(player, ervr::Cfg().physicsTrackRadius);
+        PoseOverrideBegin();
+        DeclareTestBone();
+        ContactFrame(player, now);
+        PoseOverrideEnd();
+        HitJudgeFrame(player, now);
+        HurtboxProbeFrame(player);
+        DummyProbeFrame();
     }
-    TestBoneOverride();
+    PoseOverrideWrite(0, nullptr);
+    PoseOverrideLog();
+    SwordRigPinStamina();
+}
+
+void PhysBeforeModelPos(void* ctrl) {
+    if (!g_enabled.load() || !ctrl) return;
+    PoseOverrideWrite(1, ctrl);
+    SwordRigPinStamina();
+}
+
+void PhysAfterModelPos(void* ctrl) {
+    if (!g_enabled.load() || !ctrl) return;
+    PoseOverrideWrite(2, ctrl);
+    SwordRigPinStamina();
 }
 
 }  // namespace kinetic

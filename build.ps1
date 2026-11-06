@@ -23,6 +23,19 @@ if (-not $cmake) {
 if (-not $cmake) { throw "cmake not found. Install CMake or Visual Studio 2022+ with the C++ Desktop workload." }
 
 Write-Host "Using $cmake"
+
+# Kinetic: PhysX (the B&S-style sword) comes from vcpkg. Use VCPKG_ROOT, else the vcpkg that ships with
+# Visual Studio 2022 (17.6+, "vcpkg package manager" component). The first build compiles PhysX (10-20 min).
+if (-not $env:VCPKG_ROOT) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $vs = & $vswhere -latest -products * -property installationPath
+        $bundled = Join-Path $vs "VC\vcpkg"
+        if (Test-Path (Join-Path $bundled "scripts\buildsystems\vcpkg.cmake")) { $env:VCPKG_ROOT = $bundled }
+    }
+}
+if ($env:VCPKG_ROOT) { Write-Host "vcpkg: $env:VCPKG_ROOT" }
+else { Write-Warning "vcpkg not found: building without PhysX (no B&S-style sword). Install the 'vcpkg package manager' component of Visual Studio, or set VCPKG_ROOT." }
 & $cmake -S $root -B "$root\build" -A x64
 if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 & $cmake --build "$root\build" --config $Config

@@ -1,5 +1,24 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.6.5 LANGUAGES C CXX RC)
+
+# Kinetic Elden Ring VR: PhysX (the B&S-style sword, src/phys/sword_rig.*) comes from vcpkg (vcpkg.json).
+# With VCPKG_ROOT set (Visual Studio 2022 17.6+ ships vcpkg; build.ps1 finds it) the toolchain is picked up here and
+# PhysX is built once, statically, against the same static CRT as ERVR. Without vcpkg the mod still builds, without PhysX.
+option(KINETIC_PHYSX "Build the Kinetic physics layer with PhysX (needs vcpkg)" ON)
+option(KINETIC_REQUIRE_PHYSX "Fail the configure if PhysX is not found (CI)" OFF)
+if(KINETIC_PHYSX AND NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT}
+   AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+  set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+endif()
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+  set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")   # static libs + /MT, like ERVR
+endif()
+if(NOT KINETIC_PHYSX)
+  set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "" FORCE)
+endif()
+
+# Kinetic Elden Ring VR versions: 0.7.x on top of upstream ERVR 0.6.5, x = the Kinetic milestone (0.7.2 = M2).
+# A distinct number makes the launcher replace an installed ERVR.dll on its own ("older" -> Update).
+project(EldenRingVR VERSION 0.7.2 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
@@ -143,10 +162,32 @@ add_library(ERVR SHARED
   src/ervr/body_haptics_er.cpp
   src/phys/phys_layer.cpp
   src/phys/chr_tracker.cpp
+  src/phys/sword_rig.cpp
+  src/phys/pose_override.cpp
+  src/phys/enemy_contact.cpp
+  src/phys/hit_judge.cpp
+  src/phys/hurtbox_probe.cpp
+  src/phys/game_shapes.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr src/phys ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
+if(KINETIC_PHYSX)
+  find_package(unofficial-omniverse-physx-sdk CONFIG QUIET)
+endif()
+if(TARGET unofficial::omniverse-physx-sdk::sdk)
+  target_link_libraries(ERVR PRIVATE unofficial::omniverse-physx-sdk::sdk)
+  target_compile_definitions(ERVR PRIVATE KINETIC_HAS_PHYSX=1)
+  if(VCPKG_TARGET_TRIPLET MATCHES "static")
+    target_compile_definitions(ERVR PRIVATE PX_PHYSX_STATIC_LIB)
+  endif()
+  message(STATUS "Kinetic: PhysX found - the B&S-style sword is built in")
+elseif(KINETIC_REQUIRE_PHYSX)
+  message(FATAL_ERROR "Kinetic: PhysX not found (configure with the vcpkg toolchain, see build.ps1)")
+else()
+  target_compile_definitions(ERVR PRIVATE KINETIC_HAS_PHYSX=0)
+  message(WARNING "Kinetic: PhysX not found - building without the B&S-style sword. Install Visual Studio's vcpkg component or set VCPKG_ROOT.")
+endif()
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
 
 # ---- ervr_haptics_test.exe: the body haptics without the game ----------------------------------

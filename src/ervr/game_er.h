@@ -92,6 +92,12 @@ bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc)
 // The save's character level (PlayerGameData +0x68), -1 if unavailable. Logged with combat so an
 // over-levelled test character is not mistaken for a broken damage model.
 int GameERPlayerLevel();
+// The player's Strength stat (1..99), or -1.
+int GameERPlayerStrength();
+// A character's ChrCtrl (what the model-pos update is called with), or null.
+uint8_t* GameERChrCtrl(uint8_t* chr);
+// The character's live pose buffers through each behavior path that has one (distinct, up to 2). Returns the count.
+int GameERChrPoseBuffers(uint8_t* chr, float* out[2]);
 // WorldChrMan (null until in-game). Combat's enemy watcher reads the game's own by-distance
 // ChrIns list from it (hit / damage ground truth).
 uint8_t* GameERWorldChrMan();
@@ -116,6 +122,13 @@ uint8_t* GameERChrHkbCharacter(uint8_t* chr);
 bool GameERHkbSkeleton(uint8_t* hkb, std::vector<std::string>& names, std::vector<int16_t>& parents);
 // The live, parent-relative pose buffer: boneCount x hkQsTransform {t[4], q[4] xyzw, s[4]}. Null if unreadable.
 float* GameERHkbLivePose(uint8_t* hkb);
+// A character's ChrCtrl model matrix as position + rotation: the transform the renderer hangs its skeleton off.
+bool GameERChrModelRoot(uint8_t* chr, Vec3* pos, Quat* rot);
+// Maps hand h's tracking-frame grip (the frame kinetic::SwordRigStep works in) into the game world:
+// world = origin + rot * (play * scale). From the last arm solve; false if older than 0.1 s.
+bool GameERPlayToWorld(int hand, Vec3* origin, Quat* rot, float* scale);
+// The first-person camera (eye) position last written, world. False before one was written.
+bool GameEREyeWorld(Vec3* out);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and
