@@ -10,6 +10,7 @@
 #include "pose_override.h"
 
 #include <windows.h>
+#include <map>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
@@ -355,7 +356,30 @@ void ContactFrame(uint8_t* player, double now) {
         {
             bool listed = false;
             const std::vector<std::string> want = WantedWeapons(c.physicsEnemyWeapons, t.npcId, listed);
-            std::vector<std::string> names = want;
+            // "N=node": that node only while bit N of the enemy's draw mask is set. The mask is the enemy's own copy of
+            // NpcParam modelDispMask (CSChrModelIns+0x138), which drawing / putting away a weapon changes.
+            uint32_t drawMask = 0; bool haveMask = false;
+            {
+                uintptr_t mi = 0;
+                if (ervr::SafeRead(t.chr + 0x50, &mi, 8) && mi > 0x10000 && ervr::SafeRead((void*)(mi + 0x138), &drawMask, 4)) haveMask = true;
+            }
+            std::vector<std::string> names;
+            for (const std::string& w : want) {
+                const size_t eq = w.find('=');
+                if (eq == std::string::npos) { names.push_back(w); continue; }
+                const int bit = std::atoi(w.substr(0, eq).c_str());
+                if (haveMask && bit >= 0 && bit < 32 && ((drawMask >> bit) & 1)) names.push_back(w.substr(eq + 1));
+            }
+            {
+                static std::map<uint8_t*, uint32_t> lastMask;
+                auto it = lastMask.find(t.chr);
+                if (c.physicsContactLog && listed && haveMask && (it == lastMask.end() || it->second != drawMask)) {
+                    std::string sel;
+                    for (const std::string& nm : names) sel += " " + nm;
+                    LOGI("[phys] weapons of npc %d (chr %p): draw mask 0x%08x ->%s", t.npcId, (void*)t.chr, drawMask, sel.empty() ? " none" : sel.c_str());
+                }
+                lastMask[t.chr] = drawMask;
+            }
             if (!listed && !c.physicsEnemyWeaponBone.empty()) names.push_back(c.physicsEnemyWeaponBone);
             std::string missing;
             for (const std::string& nm : names) {

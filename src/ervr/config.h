@@ -831,7 +831,7 @@ struct Config {
     float physicsEnemyWeaponLength = 1.0f;     // m; 0 = no weapon capsule
     // Per model (ChrIns+0x64, e.g. 4311): which weapon nodes of its model it holds, "4311:R_Weapon_Spear,L_Weapon_Shield;..."
     // Their shape is the mesh's box from the model data. A model not listed uses EnemyWeaponBone.
-    std::string physicsEnemyWeapons = "4311:R_Weapon_Spear,L_Weapon_Shield";
+    std::string physicsEnemyWeapons = "4311:1=R_Weapon_Sword,4=R_Weapon_Spear,0=R_Weapon_Warpick,10=L_Weapon_Shield,11=L_Weapon_Shield_big";
     float physicsEnemyShieldKg = 5.f;          // an enemy shield as a physics body
     float physicsEnemyShieldForce = 200.f;     // N its arm holds it with
     float physicsEnemyShieldTorque = 60.f;     // N*m about its grip
