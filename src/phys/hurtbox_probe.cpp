@@ -421,11 +421,18 @@ void DumpMeshTable(uintptr_t fl, int npc, int param, uint32_t mask) {
     }
 }
 
-// Material names: FLVER material names carry the modelDispMask index as #NN# (soulsmodding FLVER notes). Walk
+// Material names: FLVER material names carry the modelDispMask index as #NN# (soulsmodding FLVER notes; full-width
+// signs in some models). Walk
 // two pointer levels from the model objects and log every UTF-16 string with "#<digits>#" or a material path.
 bool WideMatch(const uint16_t* w, size_t n, std::string& out) {
     out.clear();
-    for (size_t k = 0; k < n && w[k]; ++k) { if (w[k] < 32 || w[k] > 126) return false; out += (char)w[k]; }
+    // c4311's material names use full-width signs (U+FF03 for #; kh-er zdraw.rs disp_group): read them as '#'.
+    for (size_t k = 0; k < n && w[k]; ++k) {
+        if (w[k] == 0xFF03) { out += '#'; continue; }
+        if (w[k] >= 0xFF10 && w[k] <= 0xFF19) { out += (char)('0' + (w[k] - 0xFF10)); continue; }   // full-width digits
+        if (w[k] < 32) return false;
+        out += w[k] <= 126 ? (char)w[k] : '?';
+    }
     if (out.size() < 4 || out.size() > 200) return false;
     for (size_t k = 0; k + 2 < out.size(); ++k)
         if (out[k] == '#' && isdigit((unsigned char)out[k + 1])) {
@@ -436,11 +443,11 @@ bool WideMatch(const uint16_t* w, size_t n, std::string& out) {
 }
 
 void ScanStrings(uintptr_t at, const std::string& path, std::set<std::string>& seen, int& lines) {
-    if (!PtrLike(at) || lines >= 160) return;
+    if (!PtrLike(at) || lines >= 300) return;
     static uint16_t w[0x800];
     size_t got = 0;
     for (size_t c = 0x800; c >= 0x40; c /= 2) if (ervr::SafeRead((void*)at, w, c * 2)) { got = c; break; }
-    for (size_t k = 0; k < got && lines < 160; ++k) {
+    for (size_t k = 0; k < got && lines < 300; ++k) {
         if (k && w[k - 1]) continue;   // strings start after a 0 (or at the target)
         std::string x;
         if (!WideMatch(w + k, got - k, x) || seen.count(x)) continue;
