@@ -535,8 +535,9 @@ void Embed(Rig& r, const Params& p, int slot, const PxVec3& point, const PxVec3&
     j->setDrive(PxD6Drive::eX, PxD6JointDrive(0.f, std::fmax(ervr::Cfg().physicsBodyFriction, 0.f), PX_MAX_F32, false));
     j->setDrivePosition(PxTransform(PxIdentity));
     j->setDriveVelocity(PxVec3(0.f), PxVec3(0.f));
-    // A hard enough yank tears it out.
-    j->setBreakForce(std::fmax(p.force * 3.f, 500.f), std::fmax(p.torque * 3.f, 150.f));
+    // No break force (as Blade & Sorcery's penetration joint): it comes out only pulled back along the way in,
+    // against BodyFriction, or when your hand gets SwordSnapDistance away from it.
+    (void)p;
     r.embed = j; r.embedSlot = slot; r.embedKey = r.slotKey[slot]; r.embedSince = r.simTime; r.embedBack = std::fmax(back, 0.01f);
     // The blow itself may land (the game's collision is let through briefly), then nothing until it is out.
     g_embedded[r.hand].store(true); g_embedHoldFrom[r.hand].store(NowSec() + 0.12);
