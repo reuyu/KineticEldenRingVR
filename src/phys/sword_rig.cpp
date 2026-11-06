@@ -479,6 +479,18 @@ void SyncEnemies(Rig& r, const Params& p) {
         const int k = slotOf[i];
         if (k < 0) continue;
         const PlayPart& pp = p.parts[i];
+        // The stuck blade's part is being swapped for another one in this slot: free the blade first, or the
+        // joint would yank it to wherever the new part is (a 1.6 MN fling in the 2a7e6a9 test).
+        if (k == r.embedSlot && r.embed && r.slotKey[k] != pp.key) {
+            LOGI("[phys] stuck blade %s free after %.2f s: its part left the simulation", r.hand ? "R" : "L", r.simTime - r.embedSince);
+            ReleaseEmbed(r, 0.15f);
+        }
+        // Its part jumped further than SwordSnapDistance in one frame (a teleport, not a motion): free it too.
+        if (k == r.embedSlot && r.embed && r.slotActive[k] && (pp.pose.p - r.slotTo[k].p).magnitude() > p.snap) {
+            LOGI("[phys] stuck blade %s free after %.2f s: its part jumped %.2f m in one frame", r.hand ? "R" : "L", r.simTime - r.embedSince,
+                 (pp.pose.p - r.slotTo[k].p).magnitude());
+            ReleaseEmbed(r, 0.15f);
+        }
         if (pp.box) r.enemyBox[k]->setGeometry(PxBoxGeometry(PxVec3(std::fmax(pp.half.x, 0.002f), std::fmax(pp.half.y, 0.002f), std::fmax(pp.half.z, 0.002f))));
         else r.enemyShape[k]->setGeometry(PxCapsuleGeometry(pp.radius, pp.halfHeight > 0.001f ? pp.halfHeight : 0.001f));
         r.slotBox[k] = pp.box; r.slotWorldSpeed[k] = pp.worldSpeed; r.slotWorldVel[k] = pp.worldVel; r.slotHaveVel[k] = pp.haveVel; r.slotWeaponSpeed[k] = pp.weaponSpeed;
@@ -495,6 +507,10 @@ void SyncEnemies(Rig& r, const Params& p) {
     }
     for (int k = 0; k < kMaxParts; ++k) {
         if (used[k] || !r.slotActive[k]) continue;
+        if (k == r.embedSlot && r.embed) {
+            LOGI("[phys] stuck blade %s free after %.2f s: its part left the simulation", r.hand ? "R" : "L", r.simTime - r.embedSince);
+            ReleaseEmbed(r, 0.15f);
+        }
         r.slotActive[k] = false; r.slotKey[k] = 0;
         WeaponKinematic(r, k);
         r.enemy[k]->setGlobalPose(PxTransform(PxVec3(0.f, -1000.f - 10.f * k, 0.f)));
@@ -507,6 +523,8 @@ void ReleaseEmbed(Rig& r, float ghostSeconds) {
     r.embed = nullptr;
     if (r.embedSlot >= 0) r.ghostUntil[r.embedSlot] = r.simTime + ghostSeconds;   // let the blade leave cleanly
     r.embedSlot = -1; r.embedKey = 0;
+    // Let go with the hand's motion, not whatever the joint was doing (no fling).
+    if (r.body && r.anchor) { r.body->setLinearVelocity(r.anchor->getLinearVelocity()); r.body->setAngularVelocity(r.anchor->getAngularVelocity()); }
     g_embedded[r.hand].store(false); g_embedHoldFrom[r.hand].store(1e18); g_releasedAt[r.hand].store(NowSec());
 }
 
@@ -821,7 +839,9 @@ bool StepCore(Rig* rp, const Params* pp, PxTransform* out) {
         ClassifyImpacts(r, p, preLin, preAng, h);
         TendCut(r, p, h);
         TendEmbed(r);
-        ConstrainOrientation(r, p, PxTransform(pos, rot));
+        // A stuck blade is held by its part: setting its pose to the hand's every sub-step fought the joint
+        // (225 kN-1.6 MN in the 2a7e6a9 test). The hand's drives still pull on it.
+        if (!r.embed) ConstrainOrientation(r, p, PxTransform(pos, rot));
     }
     g_sink.acc = nullptr; g_sink.hits = nullptr; g_sink.impacts = nullptr; g_sink.nImpacts = nullptr;
     r.lastTarget = p.target;

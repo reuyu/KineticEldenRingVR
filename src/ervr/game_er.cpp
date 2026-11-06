@@ -1102,6 +1102,7 @@ struct FrameInfo {
     float headYaw = 0;   // HMD yaw relative to the tracking origin (game convention, positive = right)
     float bodyYaw = 0;   // absolute yaw the body is driven toward: facing, torso twist, elbow poles
     Vec3  handP[2]; Quat handQ[2]; bool handValid[2]{};
+    Quat  rawQ[2];       // the controller as tracked, before the inertial weapon (for the bent-weapon log)
 };
 
 // ---------------------------------------------------------------- cast aim
@@ -1417,6 +1418,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
+            f.rawQ[h] = q;
             float handRotX = c.handRotOffX;
             DebugKeysHandRotX(&handRotX);
             const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
@@ -2356,6 +2358,23 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
                 const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
                 tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
                                                                cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
+                // Bent-weapon log: how far the drawn weapon (inertial / physics) and the pinned hand are from your
+                // real controllers. Logged when either stays over 20 degrees for 0.3 s (at most 2 per second).
+                if (FramePumpCurrentPass() != 2) {
+                    auto ang = [](Quat a, Quat b) { const Quat d = (a.Normalized().Conj() * b.Normalized()).Normalized(); return 2.f * std::acos(std::fmin(std::fabs(d.w), 1.f)) * 57.2958f; };
+                    const float wepOff = ang(f.handQ[wep], f.rawQ[wep]);
+                    const float pinOff = ang(cq, (baseQ * f.rawQ[pin] * calib).Normalized());
+                    static double bentSince = 0, lastLog = 0;
+                    const double now = NowSec();
+                    if (wepOff > 20.f || pinOff > 20.f) {
+                        if (bentSince == 0) bentSince = now;
+                        if (now - bentSince > 0.3 && now - lastLog > 0.5) {
+                            lastLog = now;
+                            LOGI("[bent] two-hand: drawn weapon %.0f deg off your %s controller, pinned %s hand %.0f deg off your %s controller, for %.1f s",
+                                 wepOff, wep == 1 ? "right" : "left", pin == 1 ? "right" : "left", pinOff, pin == 1 ? "right" : "left", now - bentSince);
+                        }
+                    } else bentSince = 0;
+                }
             }
         }
     }
